@@ -76,6 +76,10 @@ cd "$ANDROID_HOME/extras/google/auto"
 ./desktop-head-unit
 ```
 
+不想自己编译的话，可以直接装 CI 打好的调试包：在 [Actions](https://github.com/PandaQuQ/MeiloX/actions/workflows/ci.yml) 里打开对应分支最新那次 **CI**，下载构件 `meilox-debug-<编号>`，解压后运行 `adb install -r <apk文件>`。注意调试包和正式版签名不同，第一次安装前要先卸载手机上的正式版。
+
+截图给 UI 验收：在运行 DHU 的那个终端里输入 `day` 或 `night` 切换白天和夜间模式，再输入 `screenshot day.png` 或 `screenshot night.png` 存图。首页、媒体库和一个歌单页各截白天、夜间两张。
+
 DHU 窗口打开后，在车机的应用列表里找到 MeiloX。每次改完代码重新 `installDebug`，然后在 DHU 里重新打开 MeiloX；如果车机上还是旧内容，就关掉 DHU 重开。
 
 每次提交前至少走一遍：
