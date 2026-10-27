@@ -50,6 +50,43 @@ git -C ../Glasmio checkout cf57af9c63b7e7a27ee9c12b1602dc3d59df6b54
 ./gradlew -Pglasmio.source=true :app:assembleDebug
 ```
 
+## Android Auto 开发与测试
+
+MeiloX 在 Android Auto 上是媒体类应用。车机界面由系统统一绘制，App 只通过 `MusicService`（Media3 `MediaLibraryService`）提供浏览树、搜索和播放控制，不需要也不能自定义车机布局。
+
+### 环境
+
+- 按上面的「Build from source」装好 JDK 21、Android SDK 37.0 和 Glasmio 源码。
+- 在 Android Studio 的 SDK Manager → SDK Tools 里勾选 **Android Auto Desktop Head Unit Emulator**（DHU）。装好后在 `$ANDROID_HOME/extras/google/auto/` 下。
+- 测试手机：Android 13 及以上（`minSdk = 33`），arm64 真机。App 只打 `arm64-v8a`，x86_64 模拟器装不上。
+- 手机上装好 Android Auto（Android 10 以后系统自带，在「设置 → 已连接的设备 → Android Auto」里）。
+
+### 打开 Android Auto 开发者模式
+
+1. 在 Android Auto 设置页连续点 **版本** 10 次，确认开启开发者模式。
+2. 右上角菜单 → **开发者设置**，打开 **未知来源**。不开的话，不是从 Play 商店装的调试包不会出现在车机上。
+3. 右上角菜单 → **启动车机服务器**（Start head unit server）。
+
+### 用 DHU 测试
+
+```sh
+./gradlew -Pglasmio.source=true :app:installDebug
+adb forward tcp:5277 tcp:5277
+cd "$ANDROID_HOME/extras/google/auto"
+./desktop-head-unit
+```
+
+DHU 窗口打开后，在车机的应用列表里找到 MeiloX。每次改完代码重新 `installDebug`，然后在 DHU 里重新打开 MeiloX；如果车机上还是旧内容，就关掉 DHU 重开。
+
+每次提交前至少走一遍：
+
+- 首页分类能打开，每层都有封面和标题，驾驶状态下列表最多显示 6 行。
+- 搜索（语音或键盘）能搜到歌曲，点结果直接开始播放。
+- 播放、暂停、上一首、下一首、进度条都和手机端同步。
+- 手机端没登录时，车机上给出提示，而不是一片空白或者崩溃。
+
+App 日志用 `adb logcat --pid=$(adb shell pidof com.neoruaa.meilox)` 看，DHU 自己的输出看运行它的那个终端。
+
 ## 歌词共享
 
 已接入 [Lyricon Provider](https://tomakino.github.io/lyricon/zh-cn/developer/provider/)、[SuperLyricApi](https://github.com/HChenX/SuperLyricApi) 和 [ColorOS Live Lyrics Bridge](https://github.com/Andrea-lyz/ColorOS-Live-Lyrics-Bridge) 接口，用于共享歌词、逐字时间、翻译及播放状态。
