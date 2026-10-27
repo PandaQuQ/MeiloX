@@ -1,0 +1,72 @@
+name: CI
+
+# Debug build + unit tests for feature branches and PRs.
+# No signing, no release, no secrets. Release stays in main.yml.
+
+on:
+  push:
+    branches: ["feature/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout pinned Glasmio source
+        uses: actions/checkout@v4
+        with:
+          repository: NEORUAA/Glasmio
+          ref: cf57af9c63b7e7a27ee9c12b1602dc3d59df6b54
+          path: .glasmio-ci
+          persist-credentials: false
+
+      - name: Place Glasmio beside the app checkout
+        run: mv "$GITHUB_WORKSPACE/.glasmio-ci" "$GITHUB_WORKSPACE/../Glasmio"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 15859902
+          packages: platform-tools
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK and run unit tests
+        run: >-
+          ./gradlew --no-daemon
+          assembleDebug testDebugUnitTest
+          -Pglasmio.source=true
+          -Pmei.buildCommitSha=${{ github.sha }}
+          -Pmei.ciRunNumber=${{ github.run_number }}
+          -Pmei.ciRunAttempt=${{ github.run_attempt }}
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: meilox-debug-${{ github.run_number }}
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ github.run_number }}
+          path: app/build/reports/tests/
