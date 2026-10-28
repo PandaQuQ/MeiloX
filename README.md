@@ -76,7 +76,7 @@ cd "$ANDROID_HOME/extras/google/auto"
 ./desktop-head-unit
 ```
 
-不想自己编译的话，可以直接装 CI 打好的调试包：在 [Actions](https://github.com/PandaQuQ/MeiloX/actions/workflows/ci.yml) 里打开**要测的那张 PR 的分支**（比如浏览树在 `feature/aa-browse-tree`，不是 `feature/android-auto`）最新一次绿色的 **CI**，下载构件 `meilox-debug-<编号>`，解压后运行 `adb install -r <apk文件>`。调试包的包名是 `com.neoruaa.meilox.debug`，桌面和车机上显示为「MeiloX Dev」，可以和正式版同时装，不用卸载正式版。调试包要单独登录一次，它和正式版的登录状态、下载、缓存是分开的。
+不想自己编译的话，可以直接装 CI 打好的调试包：在 [Actions](https://github.com/PandaQuQ/MeiloX/actions/workflows/ci.yml) 里打开**要测的那张 PR 的分支**（比如浏览树在 `feature/aa-browse-tree`，不是 `feature/android-auto`）最新一次绿色的 **CI**，下载构件 `meilox-debug-<编号>`，解压后运行 `adb install -r <apk文件>`。构建号要和那张 PR 的最新绿色 CI 对上。`feature/android-auto` 分支上的构件（比如 `meilox-debug-12`）没有合进车机代码，包名也还是正式版的 `com.neoruaa.meilox`，装的时候会报和正式版冲突，装上了车机上也看不到。只有 `6cf9434` 及以后的构建才带 `.debug` 后缀，安装页显示的包名不是 `com.neoruaa.meilox.debug` 就是下错了。调试包的包名是 `com.neoruaa.meilox.debug`，桌面和车机上显示为「MeiloX Dev」，可以和正式版同时装，不用卸载正式版。调试包要单独登录一次，它和正式版的登录状态、下载、缓存是分开的。
 
 截图给 UI 验收：在运行 DHU 的那个终端里输入 `day` 或 `night` 切换白天和夜间模式，再输入 `screenshot day.png` 或 `screenshot night.png` 存图。首页、媒体库里的歌单网格、一个歌单里的歌曲列表、正在播放页，这 4 个界面白天和夜间各截一张。
 
@@ -91,10 +91,11 @@ DHU 窗口打开后，在车机的应用列表里找到「MeiloX Dev」。每次
 
 车机上找不到「MeiloX Dev」时按顺序查：
 
-1. 手机桌面上有「MeiloX Dev」吗？没有就是装错了包，要装 PR 分支上的调试包。
+1. 手机桌面上有「MeiloX Dev」吗？没有，或者安装时报和正式版冲突，就是装错了包，要装 PR 分支上的调试包。
 2. Android Auto 开发者设置里的「未知来源」开了吗？
 3. Android Auto 设置 →「自定义启动器」里，MeiloX Dev 勾上了吗？
-4. 断开重连，或者强行停止 Android Auto 再进，DHU 的话就重启它。
+4. 还是没有，就把安装来源标成 Play 商店重装：有电脑用 `adb install -r -i com.android.vending <apk文件>`；没电脑用 InstallerX Revived（授权选 Shizuku 或 Root），把安装来源设成 `com.android.vending` 再装。新版 Android Auto 对侧载应用限制更严，只开「未知来源」不一定够。
+5. 断开重连，或者强行停止 Android Auto 再进，DHU 的话就重启它。
 
 App 日志用 `adb logcat --pid=$(adb shell pidof com.neoruaa.meilox.debug)` 看，DHU 自己的输出看运行它的那个终端。
 
