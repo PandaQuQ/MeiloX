@@ -76,6 +76,10 @@ class AndroidAutoLibrary(
 ) {
     private val gson = Gson()
 
+    /** Last MediaLibrary browser package — used when granting artwork content:// read. */
+    @Volatile
+    private var lastBrowserPackage: String? = null
+
     fun onGetLibraryRoot(
         controller: MediaSession.ControllerInfo,
         params: LibraryParams?,
@@ -83,6 +87,7 @@ class AndroidAutoLibrary(
         if (!allowsBrowse(controller)) {
             return Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_PERMISSION_DENIED))
         }
+        lastBrowserPackage = controller.packageName
         val extras = Bundle().apply {
             putInt(
                 MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE,
@@ -111,6 +116,7 @@ class AndroidAutoLibrary(
         if (!allowsBrowse(controller)) {
             return Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_PERMISSION_DENIED))
         }
+        lastBrowserPackage = controller.packageName
         val future = SettableFuture.create<LibraryResult<ImmutableList<MediaItem>>>()
         scope.launch {
             try {
@@ -131,6 +137,7 @@ class AndroidAutoLibrary(
         if (!allowsBrowse(controller)) {
             return Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_PERMISSION_DENIED))
         }
+        lastBrowserPackage = controller.packageName
         val future = SettableFuture.create<LibraryResult<MediaItem>>()
         scope.launch {
             try {
@@ -775,13 +782,16 @@ class AndroidAutoLibrary(
         val trimmed = url?.takeIf { it.isNotBlank() } ?: return null
         if (trimmed.startsWith("/")) return trimmed.toUri()
         val sized = trimmed.aaBrowseCoverUrl()
-        return ArtworkContentProvider.browseUri(context, sized)
+        val uri = ArtworkContentProvider.browseUri(context, sized)
+        ArtworkContentProvider.grantReadForCar(context, uri, lastBrowserPackage)
+        return uri
     }
 
     private fun MediaItem.withNowPlayingArtwork(): MediaItem {
         val meta = localConfiguration?.tag as? com.ljyh.mei.data.model.MediaMetadata ?: return this
         val cover = meta.coverUrl.takeIf { it.isNotBlank() && !it.startsWith("/") } ?: return this
         val uri = ArtworkContentProvider.nowPlayingUri(context, cover.aaNowPlayingCoverUrl())
+        ArtworkContentProvider.grantReadForCar(context, uri, lastBrowserPackage)
         return buildUpon()
             .setMediaMetadata(
                 mediaMetadata.buildUpon()

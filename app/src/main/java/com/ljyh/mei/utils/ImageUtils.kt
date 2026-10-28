@@ -45,21 +45,30 @@ fun String.forceHttps(): String = when {
     else -> this
 }
 
-/** Browse-grid cover: https + 300×300. Local paths unchanged. */
-fun String.aaBrowseCoverUrl(): String {
+/**
+ * Force https and set/replace NetEase `param=` to [size] (e.g. "300y300").
+ * Local paths and blank strings are left unchanged. Other query params are kept.
+ */
+fun String.aaCoverUrlWithParam(size: String): String {
     if (isBlank() || startsWith("/")) return this
-    return forceHttps().let { base ->
-        if (base.contains("param=")) base else base.middleImage()
+    val https = forceHttps()
+    val uri = android.net.Uri.parse(https)
+    val builder = uri.buildUpon().clearQuery()
+    for (name in uri.queryParameterNames) {
+        if (name == "param") continue
+        for (value in uri.getQueryParameters(name)) {
+            builder.appendQueryParameter(name, value)
+        }
     }
+    builder.appendQueryParameter("param", size)
+    return builder.build().toString()
 }
 
-/** Now-playing cover: https + 500×500. Local paths unchanged. */
-fun String.aaNowPlayingCoverUrl(): String {
-    if (isBlank() || startsWith("/")) return this
-    return forceHttps().let { base ->
-        if (base.contains("param=")) base else base.largeImage()
-    }
-}
+/** Browse-grid cover: https + 300×300 (replaces any existing param=). */
+fun String.aaBrowseCoverUrl(): String = aaCoverUrlWithParam("300y300")
+
+/** Now-playing cover: https + 500×500 (replaces any existing param=). */
+fun String.aaNowPlayingCoverUrl(): String = aaCoverUrlWithParam("500y500")
 
 
 class CoilImageLoader {

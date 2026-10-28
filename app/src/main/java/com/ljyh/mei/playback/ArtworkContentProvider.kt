@@ -3,6 +3,7 @@ package com.ljyh.mei.playback
 import android.content.ContentProvider
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.database.Cursor
 import android.graphics.Bitmap
 import android.net.Uri
@@ -70,6 +71,8 @@ class ArtworkContentProvider : ContentProvider() {
     companion object {
         private const val TAG = "ArtworkContentProvider"
         const val AUTHORITY_SUFFIX = ".aa.artwork"
+        /** Android Auto / Projection host — must be granted read on non-exported artwork URIs. */
+        const val GEARHEAD_PACKAGE = "com.google.android.projection.gearhead"
         private const val PATH_BROWSE = "browse"
         private const val PATH_NOW_PLAYING = "nowplaying"
         private val locks = ConcurrentHashMap<String, Any>()
@@ -81,6 +84,30 @@ class ArtworkContentProvider : ContentProvider() {
 
         fun nowPlayingUri(context: Context, httpsUrl: String): Uri =
             buildUri(context, PATH_NOW_PLAYING, httpsUrl)
+
+        /**
+         * Grant read access so Android Auto (separate process) can open our non-exported
+         * content:// artwork. Always grants [GEARHEAD_PACKAGE]; also [controllerPackage] when set.
+         * Provider stays exported=false with grantUriPermissions=true.
+         */
+        fun grantReadForCar(context: Context, uri: Uri, controllerPackage: String? = null) {
+            if (uri.scheme != "content") return
+            val targets = linkedSetOf(GEARHEAD_PACKAGE)
+            if (!controllerPackage.isNullOrBlank()) {
+                targets += controllerPackage
+            }
+            for (pkg in targets) {
+                try {
+                    context.grantUriPermission(
+                        pkg,
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                } catch (error: SecurityException) {
+                    Timber.tag(TAG).w(error, "grantUriPermission failed for %s → %s", pkg, uri)
+                }
+            }
+        }
 
         private fun buildUri(context: Context, path: String, url: String): Uri =
             Uri.Builder()
