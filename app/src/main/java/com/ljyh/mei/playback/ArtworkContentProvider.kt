@@ -8,14 +8,25 @@ import android.database.Cursor
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import androidx.media3.common.MediaItem
 import coil3.SingletonImageLoader
-import com.ljyh.mei.BuildConfig
 import coil3.request.ImageRequest
 import coil3.request.allowHardware
 import coil3.toBitmap
+import com.ljyh.mei.BuildConfig
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeout
 import timber.log.Timber
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 
@@ -26,25 +37,31 @@ import java.util.concurrent.ConcurrentHashMap
  * and hand the host a read-only [ParcelFileDescriptor]. Paths:
  *   content://${applicationId}.aa.artwork/browse/<url>
  *   content://${applicationId}.aa.artwork/nowplaying/<url>
+ *
+ * [openFile] must not hang the binder thread on a cold cache miss — misses are
+ * capped with [OPEN_MISS_TIMEOUT_MS]. [prefetchBrowseFromItems] warms the disk
+ * cache from [onGetChildren] so the car host usually hits a file.
  */
 class ArtworkContentProvider : ContentProvider() {
 
     override fun onCreate(): Boolean = true
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
-        val context = context ?: return null
-        if (mode != "r") return null
+        val context = context ?: throw FileNotFoundException("no context")
+        if (mode != "r") throw FileNotFoundException("mode $mode not supported")
         val segments = uri.pathSegments
-        if (segments.size < 2) return null
+        if (segments.size < 2) throw FileNotFoundException("bad artwork uri")
         val kind = segments[0]
         val remoteUrl = Uri.decode(segments[1])
-        if (remoteUrl.isBlank()) return null
+        if (remoteUrl.isBlank()) throw FileNotFoundException("empty artwork url")
         return try {
-            val file = cachedFile(context, kind, remoteUrl)
+            val file = cachedFile(context, kind, remoteUrl, timeoutMs = OPEN_MISS_TIMEOUT_MS)
             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        } catch (error: FileNotFoundException) {
+            throw error
         } catch (error: Exception) {
             Timber.tag(TAG).w(error, "openFile failed for %s", uri)
-            null
+            throw FileNotFoundException("artwork unavailable: ${error.message}").apply { initCause(error) }
         }
     }
 
@@ -76,7 +93,11 @@ class ArtworkContentProvider : ContentProvider() {
         const val GEARHEAD_PACKAGE = "com.google.android.projection.gearhead"
         private const val PATH_BROWSE = "browse"
         private const val PATH_NOW_PLAYING = "nowplaying"
+        /** Binder-thread miss budget; AA falls back to placeholder on [FileNotFoundException]. */
+        private const val OPEN_MISS_TIMEOUT_MS = 2_500L
         private val locks = ConcurrentHashMap<String, Any>()
+        private val prefetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val prefetchSemaphore = Semaphore(permits = 4)
 
         fun authority(context: Context): String = "${BuildConfig.APPLICATION_ID}$AUTHORITY_SUFFIX"
 
@@ -110,6 +131,37 @@ class ArtworkContentProvider : ContentProvider() {
             }
         }
 
+        /**
+         * Fire-and-forget: warm browse JPEG disk cache for artwork on the given page.
+         * Bounded to 4 concurrent Coil fetches on [Dispatchers.IO]. Does not block the caller.
+         */
+        fun prefetchBrowseFromItems(context: Context, items: List<MediaItem>) {
+            if (items.isEmpty()) return
+            val auth = authority(context)
+            val urls = items.mapNotNull { item ->
+                val uri = item.mediaMetadata.artworkUri ?: return@mapNotNull null
+                if (uri.scheme != "content" || uri.authority != auth) return@mapNotNull null
+                val segs = uri.pathSegments
+                if (segs.size < 2 || segs[0] != PATH_BROWSE) return@mapNotNull null
+                Uri.decode(segs[1]).takeIf { it.isNotBlank() }
+            }.distinct()
+            if (urls.isEmpty()) return
+            val appContext = context.applicationContext
+            prefetchScope.launch {
+                urls.map { url ->
+                    async {
+                        prefetchSemaphore.withPermit {
+                            runCatching {
+                                cachedFile(appContext, PATH_BROWSE, url, timeoutMs = 30_000L)
+                            }.onFailure { err ->
+                                Timber.tag(TAG).d(err, "prefetch miss for %s", url.take(80))
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+        }
+
         private fun buildUri(context: Context, path: String, url: String): Uri =
             Uri.Builder()
                 .scheme("content")
@@ -118,7 +170,12 @@ class ArtworkContentProvider : ContentProvider() {
                 .appendPath(Uri.encode(url))
                 .build()
 
-        private fun cachedFile(context: Context, kind: String, url: String): File {
+        private fun cachedFile(
+            context: Context,
+            kind: String,
+            url: String,
+            timeoutMs: Long,
+        ): File {
             val dir = File(context.cacheDir, "aa_artwork").also { it.mkdirs() }
             val key = Integer.toHexString((kind + '\u0000' + url).hashCode())
             val out = File(dir, "$key.jpg")
@@ -133,9 +190,17 @@ class ArtworkContentProvider : ContentProvider() {
                     .size(size)
                     .allowHardware(false)
                     .build()
-                val image = runBlocking {
-                    loader.execute(request).image
-                } ?: error("Coil returned no image for $url")
+                val image = try {
+                    runBlocking {
+                        withTimeout(timeoutMs) {
+                            loader.execute(request).image
+                        }
+                    }
+                } catch (error: Exception) {
+                    throw FileNotFoundException(
+                        "artwork load timed out or failed (${timeoutMs}ms): ${error.message}",
+                    ).apply { initCause(error) }
+                } ?: throw FileNotFoundException("Coil returned no image for $url")
                 val bitmap = image.toBitmap()
                 val tmp = File(dir, "$key.tmp")
                 FileOutputStream(tmp).use { stream ->

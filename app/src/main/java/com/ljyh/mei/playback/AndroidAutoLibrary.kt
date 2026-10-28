@@ -160,6 +160,8 @@ class AndroidAutoLibrary(
             try {
                 val items = loadChildren(parentId)
                 val pageItems = paginate(items, page, pageSize)
+                // Warm artwork disk cache off the binder path so AA openFile usually hits.
+                ArtworkContentProvider.prefetchBrowseFromItems(context, pageItems)
                 recordDiag(controller, "onGetChildren", parentId, "success:${pageItems.size}")
                 future.set(LibraryResult.ofItemList(pageItems, params))
             } catch (error: Exception) {
