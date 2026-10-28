@@ -89,6 +89,13 @@ DHU 窗口打开后，在车机的应用列表里找到「MeiloX Dev」。每次
 - 播放、暂停、上一首、下一首、进度条都和手机端同步。
 - 手机端没登录时，车机上给出提示，而不是一片空白或者崩溃。
 
+车机上找不到「MeiloX Dev」时按顺序查：
+
+1. 手机桌面上有「MeiloX Dev」吗？没有就是装错了包，要装 PR 分支上的调试包。
+2. Android Auto 开发者设置里的「未知来源」开了吗？
+3. Android Auto 设置 →「自定义启动器」里，MeiloX Dev 勾上了吗？
+4. 断开重连，或者强行停止 Android Auto 再进，DHU 的话就重启它。
+
 App 日志用 `adb logcat --pid=$(adb shell pidof com.neoruaa.meilox.debug)` 看，DHU 自己的输出看运行它的那个终端。
 
 ## 歌词共享
