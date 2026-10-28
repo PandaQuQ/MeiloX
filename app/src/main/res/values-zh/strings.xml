@@ -831,4 +831,7 @@
 
 <string name="flyme_status_bar_lyrics">魅族状态栏歌词</string>
 <string name="flyme_status_bar_lyrics_warning">检测到当前系统非Flyme，可能无法正确显示状态栏歌词。</string>
+    <string name="android_auto_login_required">请先在手机上登录</string>
+    <string name="android_auto_empty">暂无内容</string>
+    <string name="android_auto_error">加载失败</string>
 </resources>

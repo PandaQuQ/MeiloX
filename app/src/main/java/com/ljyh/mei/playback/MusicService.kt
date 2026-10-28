@@ -60,6 +60,7 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import androidx.media3.session.MediaController
 import androidx.media3.session.MediaLibraryService
+import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionToken
 import coil3.SingletonImageLoader
@@ -92,7 +93,11 @@ import com.ljyh.mei.data.model.MediaMetadata
 import com.ljyh.mei.data.model.metadata
 import com.ljyh.mei.data.network.netease.NcblSongInfo
 import com.ljyh.mei.data.network.netease.NeteaseClientLogClient
+import com.ljyh.mei.data.repository.HomeRepository
 import com.ljyh.mei.data.repository.MeloXRepository
+import com.google.common.collect.ImmutableList
+import com.ljyh.mei.data.repository.PlaylistRepository
+import com.ljyh.mei.data.repository.LibraryCollectionsRepository
 import com.ljyh.mei.data.repository.PlayerRepository
 import com.ljyh.mei.data.network.Resource
 import com.ljyh.mei.data.network.neteaseSessionFingerprint
@@ -232,7 +237,18 @@ class MusicService : MediaLibraryService(),
     lateinit var historyRepository: HistoryRepository
 
     @Inject
+    lateinit var libraryCollectionsRepository: LibraryCollectionsRepository
+
+    @Inject
+    lateinit var playlistRepository: PlaylistRepository
+
+    @Inject
     lateinit var meloXRepository: MeloXRepository
+
+    @Inject
+    lateinit var homeRepository: HomeRepository
+
+    private lateinit var androidAutoLibrary: AndroidAutoLibrary
 
     @Inject
     lateinit var neteaseClientLogClient: NeteaseClientLogClient
@@ -419,6 +435,17 @@ class MusicService : MediaLibraryService(),
         }
         listenTogetherStore.attachPlayer(player)
         val singletonImageLoader = SingletonImageLoader.get(this)
+        androidAutoLibrary = AndroidAutoLibrary(
+            context = this,
+            scope = scope,
+            historyRepository = historyRepository,
+            libraryCollections = libraryCollectionsRepository,
+            playlistRepository = playlistRepository,
+            meloXRepository = meloXRepository,
+            playerRepository = playerRepository,
+            homeRepository = homeRepository,
+            songRepository = songRepository,
+        )
         mediaSession = MediaLibrarySession.Builder(this, ExternalMediaPlayer(player), LibrarySessionCallback())
             .setSessionExtras(Bundle().apply {
                 putBoolean(MediaConstants.EXTRAS_KEY_SLOT_RESERVATION_SEEK_TO_PREV, true)
@@ -1125,7 +1152,8 @@ class MusicService : MediaLibraryService(),
             val result = MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller).apply {
                 setAvailablePlayerCommands(externalTransportCommands(build().availablePlayerCommands))
             }
-            if (!controller.isTrusted && controller.packageName != packageName) {
+            val allowFull = AndroidAutoLibrary.allowsBrowse(controller, packageName)
+            if (!allowFull) {
                 return Futures.immediateFuture(result.build())
             }
             val commands = result.build().availableSessionCommands.buildUpon()
@@ -1133,6 +1161,49 @@ class MusicService : MediaLibraryService(),
                 .add(SessionCommand(NOTIFICATION_RIGHT_COMMAND, Bundle.EMPTY))
                 .build()
             return Futures.immediateFuture(result.setAvailableSessionCommands(commands).build())
+        }
+
+        override fun onGetLibraryRoot(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            params: MediaLibraryService.LibraryParams?,
+        ): ListenableFuture<LibraryResult<MediaItem>> =
+            androidAutoLibrary.onGetLibraryRoot(browser, params)
+
+        override fun onGetChildren(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            parentId: String,
+            page: Int,
+            pageSize: Int,
+            params: MediaLibraryService.LibraryParams?,
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> =
+            androidAutoLibrary.onGetChildren(browser, parentId, page, pageSize, params)
+
+        override fun onGetItem(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            mediaId: String,
+        ): ListenableFuture<LibraryResult<MediaItem>> =
+            androidAutoLibrary.onGetItem(browser, mediaId)
+
+        override fun onAddMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: List<MediaItem>,
+        ): ListenableFuture<List<MediaItem>> {
+            if (!AndroidAutoLibrary.allowsBrowse(controller, packageName)) {
+                return Futures.immediateFuture(mediaItems)
+            }
+            // App-internal queues are already fully described; only resolve AA / sparse items.
+            val needsResolve = mediaItems.any { item ->
+                item.localConfiguration?.tag !is com.ljyh.mei.data.model.MediaMetadata &&
+                    (item.mediaMetadata.title.isNullOrBlank() || item.localConfiguration == null)
+            }
+            if (!needsResolve) {
+                return Futures.immediateFuture(mediaItems)
+            }
+            return androidAutoLibrary.resolvePlayableItems(mediaItems)
         }
 
         override fun onSetMediaItems(
@@ -1149,7 +1220,7 @@ class MusicService : MediaLibraryService(),
                     return Futures.immediateFuture(it)
                 }
             }
-            if (!controller.isTrusted && controller.packageName != packageName) {
+            if (!AndroidAutoLibrary.allowsBrowse(controller, packageName)) {
                 return Futures.immediateFailedFuture(UnsupportedOperationException("Only existing queue items may be selected"))
             }
             return super.onSetMediaItems(mediaSession, controller, mediaItems, startIndex, startPositionMs)

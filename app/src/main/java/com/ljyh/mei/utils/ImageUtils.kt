@@ -38,6 +38,30 @@ fun String.size1600():String{
     return "$this?param=1600y1600"
 }
 
+
+/** Prefer https for NetEase CDN covers (Android Auto / MediaSession artwork). */
+fun String.forceHttps(): String = when {
+    startsWith("http://", ignoreCase = true) -> "https://" + substring(7)
+    else -> this
+}
+
+/** Browse-grid cover: https + 300×300. Local paths unchanged. */
+fun String.aaBrowseCoverUrl(): String {
+    if (isBlank() || startsWith("/")) return this
+    return forceHttps().let { base ->
+        if (base.contains("param=")) base else base.middleImage()
+    }
+}
+
+/** Now-playing cover: https + 500×500. Local paths unchanged. */
+fun String.aaNowPlayingCoverUrl(): String {
+    if (isBlank() || startsWith("/")) return this
+    return forceHttps().let { base ->
+        if (base.contains("param=")) base else base.largeImage()
+    }
+}
+
+
 class CoilImageLoader {
     companion object {
         suspend fun loadImageDrawable(context: Context, imageUrl: String): ImageBitmap? =

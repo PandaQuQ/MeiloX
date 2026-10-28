@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SF Symbol house.fill · 24dp white monochrome for Android Auto root tabs -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M11.03,2.28a1.5,1.5 0,0 1,1.94 0l8.25,7.15c0.66,0.57 0.25,1.65 -0.66,1.65H19.5V19.5A1.5,1.5 0,0 1,18 21h-3.75a0.75,0.75 0,0 1,-0.75 -0.75V15.75a0.75,0.75 0,0 0,-0.75 -0.75h-1.5a0.75,0.75 0,0 0,-0.75 0.75v4.5A0.75,0.75 0,0 1,9.75 21H6A1.5,1.5 0,0 1,4.5 19.5v-8.42H3.44c-0.91,0 -1.32,-1.08 -0.66,-1.65l8.25,-7.15z" />
+</vector>
