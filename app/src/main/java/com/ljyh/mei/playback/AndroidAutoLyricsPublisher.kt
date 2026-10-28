@@ -4,11 +4,11 @@ import android.content.Context
 import androidx.media3.common.Player
 import androidx.media3.session.MediaSession
 import com.ljyh.mei.constants.AndroidAutoLyricsEnabledKey
-import com.ljyh.mei.constants.LyricTranslationEnabledKey
 import com.ljyh.mei.data.model.metadata
 import com.ljyh.mei.ui.model.LyricSource
 import com.ljyh.mei.utils.dataStore
 import com.ljyh.mei.utils.lyric.LyricManager
+import io.github.proify.lyricon.lyric.model.RichLyricLine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -20,7 +20,10 @@ import kotlinx.coroutines.launch
 /**
  * While an Android Auto (gearhead etc.) controller is connected and the user setting is on,
  * overlays the current lyric line onto session now-playing metadata for the car screen:
- * title = lyric line, artist/subtitle = "歌名 · 歌手".
+ * title = original lyric line (never translation), artist/subtitle = "歌名 · 歌手".
+ *
+ * Gaps (intro / interlude / after last line end), blank lines, and pure-music markers clear
+ * the overlay so the car shows the normal title and artist again.
  *
  * Media3 does not expose per-controller metadata, so this is session-wide only while a car
  * controller is connected; phone notification/lock screen stay normal when the car disconnects.
@@ -35,7 +38,6 @@ internal class AndroidAutoLyricsPublisher(
 ) : Player.Listener {
     private val carControllerKeys = linkedSetOf<String>()
     private var settingEnabled = true
-    private var displayTranslation = true
     private var syncJob: Job? = null
     private var lastPublishedLine: String? = null
     private var lastPublishedMediaId: String? = null
@@ -44,10 +46,9 @@ internal class AndroidAutoLyricsPublisher(
         player.addListener(this)
         scope.launch {
             context.dataStore.data.map {
-                (it[AndroidAutoLyricsEnabledKey] ?: true) to (it[LyricTranslationEnabledKey] ?: true)
-            }.distinctUntilChanged().collect { (enabled, translation) ->
+                it[AndroidAutoLyricsEnabledKey] ?: true
+            }.distinctUntilChanged().collect { enabled ->
                 settingEnabled = enabled
-                displayTranslation = translation
                 lastPublishedLine = null
                 syncOverlay()
             }
@@ -146,22 +147,25 @@ internal class AndroidAutoLyricsPublisher(
         syncJob = scope.launch {
             while (isActive && shouldOverlay() && player.currentMediaItem?.mediaId == mediaItem.mediaId) {
                 val position = player.currentPosition.coerceAtLeast(0L)
-                val line = lines.lastOrNull { position >= it.begin }
-                val text = line?.let { currentLineText(it) }?.takeIf { it.isNotBlank() }
+                val line = lines.lastOrNull { position >= it.begin && position < it.end }
+                val text = line?.let { originalLineText(it) }
                 publishLine(mediaItem.mediaId, text, songTitle, artist)
                 if (!player.isPlaying) break
-                val nextBoundary = lines.firstOrNull { it.begin > position }?.begin ?: break
+                val nextBoundary = lines.asSequence()
+                    .flatMap { sequenceOf(it.begin, it.end) }
+                    .filter { it > position }
+                    .minOrNull() ?: break
                 val waitMs = ((nextBoundary - position) / player.playbackParameters.speed.toDouble()).toLong()
                 delay(waitMs.coerceAtLeast(20L))
             }
         }
     }
 
-    private fun currentLineText(line: io.github.proify.lyricon.lyric.model.RichLyricLine): String? {
-        if (displayTranslation) {
-            line.translation?.takeIf { it.isNotBlank() }?.let { return it }
-        }
-        return line.text?.takeIf { it.isNotBlank() }
+    /** Original lyric only — never translation. Blank / pure-music markers count as no line. */
+    private fun originalLineText(line: RichLyricLine): String? {
+        val text = line.text?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (isNoLyricMarker(text)) return null
+        return text
     }
 
     private fun publishLine(mediaId: String, lyric: String?, songTitle: String, artist: String) {
@@ -212,4 +216,27 @@ internal class AndroidAutoLyricsPublisher(
 
     private fun controllerKey(controller: MediaSession.ControllerInfo): String =
         "${controller.packageName}:${controller.uid}"
+
+    companion object {
+        /** Pure-music / empty placeholders — show song title instead. Credit lines (作词/作曲) stay. */
+        private val NO_LYRIC_MARKERS = setOf(
+            "纯音乐，请欣赏",
+            "純音樂，請欣賞",
+            "没有歌词",
+            "沒有歌詞",
+            "此歌曲为没有填词的纯音乐，请您欣赏",
+            "Instrumental",
+            "instrumental",
+        )
+
+        internal fun isNoLyricMarker(text: String): Boolean {
+            val normalized = text.trim()
+            if (normalized.isEmpty()) return true
+            if (normalized in NO_LYRIC_MARKERS) return true
+            // Loose match for common NetEase pure-music phrasing
+            if (normalized.contains("纯音乐") && normalized.contains("请欣赏")) return true
+            if (normalized.contains("純音樂") && normalized.contains("請欣賞")) return true
+            return false
+        }
+    }
 }
