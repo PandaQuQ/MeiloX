@@ -1,5 +1,6 @@
 package com.ljyh.mei.ui.screen.log
 
+import com.ljyh.mei.BuildConfig
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
@@ -91,7 +92,7 @@ class LogViewModel @Inject constructor(
         try {
             // 获取 FileProvider URI
             // 注意：authority 必须与 AndroidManifest.xml 中的 provider authorities 一致
-            val authority = "${context.packageName}.fileprovider"
+            val authority = "${BuildConfig.APPLICATION_ID}.fileprovider"
             val uri: Uri = FileProvider.getUriForFile(context, authority, file)
 
             val intent = Intent(Intent.ACTION_SEND).apply {

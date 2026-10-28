@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.Music" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.Music" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- Brand red kept for AA now-playing FAB / accent; on-primary must stay white for the glyph. -->
+        <item name="android:colorPrimary">@color/aa_brand_red_light</item>
+        <item name="android:colorPrimaryDark">@color/aa_brand_red_light</item>
+        <item name="android:colorAccent">@color/aa_brand_red_light</item>
+        <item name="android:textColorPrimaryInverse">@color/white</item>
+        <item name="colorPrimary">@color/aa_brand_red_light</item>
+        <item name="colorPrimaryDark">@color/aa_brand_red_light</item>
+        <item name="colorAccent">@color/aa_brand_red_light</item>
+        <item name="colorOnPrimary">@color/white</item>
+    </style>
 </resources>

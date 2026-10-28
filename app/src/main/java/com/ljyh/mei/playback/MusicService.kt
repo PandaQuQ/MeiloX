@@ -60,6 +60,7 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import androidx.media3.session.MediaController
 import androidx.media3.session.MediaLibraryService
+import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaSession
 import androidx.media3.session.SessionToken
 import coil3.SingletonImageLoader
@@ -92,7 +93,11 @@ import com.ljyh.mei.data.model.MediaMetadata
 import com.ljyh.mei.data.model.metadata
 import com.ljyh.mei.data.network.netease.NcblSongInfo
 import com.ljyh.mei.data.network.netease.NeteaseClientLogClient
+import com.ljyh.mei.data.repository.HomeRepository
 import com.ljyh.mei.data.repository.MeloXRepository
+import com.google.common.collect.ImmutableList
+import com.ljyh.mei.data.repository.PlaylistRepository
+import com.ljyh.mei.data.repository.LibraryCollectionsRepository
 import com.ljyh.mei.data.repository.PlayerRepository
 import com.ljyh.mei.data.network.Resource
 import com.ljyh.mei.data.network.neteaseSessionFingerprint
@@ -232,7 +237,18 @@ class MusicService : MediaLibraryService(),
     lateinit var historyRepository: HistoryRepository
 
     @Inject
+    lateinit var libraryCollectionsRepository: LibraryCollectionsRepository
+
+    @Inject
+    lateinit var playlistRepository: PlaylistRepository
+
+    @Inject
     lateinit var meloXRepository: MeloXRepository
+
+    @Inject
+    lateinit var homeRepository: HomeRepository
+
+    private lateinit var androidAutoLibrary: AndroidAutoLibrary
 
     @Inject
     lateinit var neteaseClientLogClient: NeteaseClientLogClient
@@ -419,6 +435,17 @@ class MusicService : MediaLibraryService(),
         }
         listenTogetherStore.attachPlayer(player)
         val singletonImageLoader = SingletonImageLoader.get(this)
+        androidAutoLibrary = AndroidAutoLibrary(
+            context = this,
+            scope = scope,
+            historyRepository = historyRepository,
+            libraryCollections = libraryCollectionsRepository,
+            playlistRepository = playlistRepository,
+            meloXRepository = meloXRepository,
+            playerRepository = playerRepository,
+            homeRepository = homeRepository,
+            songRepository = songRepository,
+        )
         mediaSession = MediaLibrarySession.Builder(this, ExternalMediaPlayer(player), LibrarySessionCallback())
             .setSessionExtras(Bundle().apply {
                 putBoolean(MediaConstants.EXTRAS_KEY_SLOT_RESERVATION_SEEK_TO_PREV, true)
@@ -1122,17 +1149,94 @@ class MusicService : MediaLibraryService(),
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
         ): ListenableFuture<MediaSession.ConnectionResult> {
-            val result = MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller).apply {
-                setAvailablePlayerCommands(externalTransportCommands(build().availablePlayerCommands))
+            // Browse/library open to every controller (OEM car hosts may not be allow-listed).
+            val allowSensitive = AndroidAutoLibrary.allowsSensitiveCommands(controller, packageName)
+            val baseSessionCommands =
+                MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
+            val sessionCommands = if (allowSensitive) {
+                baseSessionCommands.buildUpon()
+                    .add(SessionCommand(NOTIFICATION_LEFT_COMMAND, Bundle.EMPTY))
+                    .add(SessionCommand(NOTIFICATION_RIGHT_COMMAND, Bundle.EMPTY))
+                    .build()
+            } else {
+                baseSessionCommands
             }
-            if (!controller.isTrusted && controller.packageName != packageName) {
-                return Futures.immediateFuture(result.build())
+            val playerCommands = externalTransportCommands(
+                MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS,
+            )
+            AaBrowseDiagnostics.record(
+                packageName = controller.packageName,
+                uid = controller.uid,
+                isTrusted = controller.isTrusted,
+                controllerVersion = controller.controllerVersion,
+                method = "onConnectAsync",
+                parentId = null,
+                result = if (allowSensitive) "accepted:sensitive" else "accepted:browse",
+            )
+            return Futures.immediateFuture(
+                MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
+                    .setAvailableSessionCommands(sessionCommands)
+                    .setAvailablePlayerCommands(playerCommands)
+                    .build(),
+            )
+        }
+
+        override fun onGetLibraryRoot(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            params: MediaLibraryService.LibraryParams?,
+        ): ListenableFuture<LibraryResult<MediaItem>> =
+            androidAutoLibrary.onGetLibraryRoot(browser, params)
+
+        override fun onGetChildren(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            parentId: String,
+            page: Int,
+            pageSize: Int,
+            params: MediaLibraryService.LibraryParams?,
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> =
+            androidAutoLibrary.onGetChildren(browser, parentId, page, pageSize, params)
+
+        override fun onGetItem(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            mediaId: String,
+        ): ListenableFuture<LibraryResult<MediaItem>> =
+            androidAutoLibrary.onGetItem(browser, mediaId)
+
+        override fun onSearch(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            params: MediaLibraryService.LibraryParams?,
+        ): ListenableFuture<LibraryResult<Void>> =
+            androidAutoLibrary.onSearch(browser, query, params)
+
+        override fun onGetSearchResult(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            page: Int,
+            pageSize: Int,
+            params: MediaLibraryService.LibraryParams?,
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> =
+            androidAutoLibrary.onGetSearchResult(browser, query, page, pageSize, params)
+
+        override fun onAddMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: List<MediaItem>,
+        ): ListenableFuture<List<MediaItem>> {
+            // Always resolve sparse / AA browse items for any caller so car playback works.
+            val needsResolve = mediaItems.any { item ->
+                item.localConfiguration?.tag !is com.ljyh.mei.data.model.MediaMetadata &&
+                    (item.mediaMetadata.title.isNullOrBlank() || item.localConfiguration == null)
             }
-            val commands = result.build().availableSessionCommands.buildUpon()
-                .add(SessionCommand(NOTIFICATION_LEFT_COMMAND, Bundle.EMPTY))
-                .add(SessionCommand(NOTIFICATION_RIGHT_COMMAND, Bundle.EMPTY))
-                .build()
-            return Futures.immediateFuture(result.setAvailableSessionCommands(commands).build())
+            if (!needsResolve) {
+                return Futures.immediateFuture(mediaItems)
+            }
+            return androidAutoLibrary.resolvePlayableItems(mediaItems)
         }
 
         override fun onSetMediaItems(
@@ -1142,16 +1246,17 @@ class MusicService : MediaLibraryService(),
             startIndex: Int,
             startPositionMs: Long,
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
-            if (controller.packageName != packageName ||
+            val external = controller.packageName != packageName ||
                 controller.controllerVersion == MediaSession.ControllerInfo.LEGACY_CONTROLLER_VERSION
-            ) {
+            if (external) {
+                // Prefer in-queue selection when the tapped item is already in the player queue.
                 externalQueueSelection(player, mediaItems, startPositionMs)?.let {
                     return Futures.immediateFuture(it)
                 }
+                // AA browse tap: expand parent container (playlist/album/…) into the full queue.
+                return androidAutoLibrary.resolveSetMediaItems(mediaItems, startIndex, startPositionMs)
             }
-            if (!controller.isTrusted && controller.packageName != packageName) {
-                return Futures.immediateFailedFuture(UnsupportedOperationException("Only existing queue items may be selected"))
-            }
+            // Own-app UI already passes fully described ListQueue items — leave unchanged.
             return super.onSetMediaItems(mediaSession, controller, mediaItems, startIndex, startPositionMs)
         }
 
@@ -1161,6 +1266,9 @@ class MusicService : MediaLibraryService(),
             customCommand: SessionCommand,
             args: Bundle,
         ): ListenableFuture<SessionResult> {
+            if (!AndroidAutoLibrary.allowsSensitiveCommands(controller, packageName)) {
+                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_PERMISSION_DENIED))
+            }
             val action = when (customCommand.customAction) {
                 NOTIFICATION_LEFT_COMMAND -> notificationLeftAction
                 NOTIFICATION_RIGHT_COMMAND -> notificationRightAction

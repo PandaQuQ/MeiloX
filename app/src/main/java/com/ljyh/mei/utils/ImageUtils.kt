@@ -38,6 +38,39 @@ fun String.size1600():String{
     return "$this?param=1600y1600"
 }
 
+
+/** Prefer https for NetEase CDN covers (Android Auto / MediaSession artwork). */
+fun String.forceHttps(): String = when {
+    startsWith("http://", ignoreCase = true) -> "https://" + substring(7)
+    else -> this
+}
+
+/**
+ * Force https and set/replace NetEase `param=` to [size] (e.g. "300y300").
+ * Local paths and blank strings are left unchanged. Other query params are kept.
+ */
+fun String.aaCoverUrlWithParam(size: String): String {
+    if (isBlank() || startsWith("/")) return this
+    val https = forceHttps()
+    val uri = android.net.Uri.parse(https)
+    val builder = uri.buildUpon().clearQuery()
+    for (name in uri.queryParameterNames) {
+        if (name == "param") continue
+        for (value in uri.getQueryParameters(name)) {
+            builder.appendQueryParameter(name, value)
+        }
+    }
+    builder.appendQueryParameter("param", size)
+    return builder.build().toString()
+}
+
+/** Browse-grid cover: https + 300×300 (replaces any existing param=). */
+fun String.aaBrowseCoverUrl(): String = aaCoverUrlWithParam("300y300")
+
+/** Now-playing cover: https + 500×500 (replaces any existing param=). */
+fun String.aaNowPlayingCoverUrl(): String = aaCoverUrlWithParam("500y500")
+
+
 class CoilImageLoader {
     companion object {
         suspend fun loadImageDrawable(context: Context, imageUrl: String): ImageBitmap? =

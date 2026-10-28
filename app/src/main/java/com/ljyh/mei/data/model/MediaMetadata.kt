@@ -12,6 +12,7 @@ import com.ljyh.mei.data.model.api.ArtistSong
 import com.ljyh.mei.data.model.melox.PodcastProgram
 import com.ljyh.mei.data.model.weapi.EveryDaySongs
 import androidx.core.net.toUri
+import com.ljyh.mei.utils.aaNowPlayingCoverUrl
 import com.ljyh.mei.utils.netease.NeteaseUtils.getResourceLink
 
 
@@ -221,11 +222,15 @@ fun MediaMetadata.toMediaItem() = MediaItem.Builder()
     .setMediaMetadata(
         androidx.media3.common.MediaMetadata.Builder()
             .setTitle(title)
-            .setSubtitle(artists.joinToString { it.name })
-            .setArtist(artists.joinToString { it.name })
+            .setSubtitle(artists.joinToString(" / ") { it.name })
+            .setArtist(artists.joinToString(" / ") { it.name })
             .setAlbumTitle(album.title)
             .setMediaType(MEDIA_TYPE_MUSIC)
-            .setArtworkUri(coverUrl.toUri())
+            .setArtworkUri(
+                coverUrl.takeIf { it.isNotBlank() }
+                    ?.aaNowPlayingCoverUrl()
+                    ?.toUri()
+            )
             .build()
     )
     .build()

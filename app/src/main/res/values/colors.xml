@@ -7,4 +7,11 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- Android Auto fixed brand accent (not per-cover dynamic) -->
+    <color name="aa_brand_red_light">#FF3B30</color>
+    <color name="aa_brand_red_dark">#FF4245</color>
+    <color name="colorPrimary">@color/aa_brand_red_light</color>
+    <color name="colorAccent">@color/aa_brand_red_light</color>
+    <color name="colorOnPrimary">@color/white</color>
+    <color name="colorPrimaryDark">@color/aa_brand_red_light</color>
 </resources>
