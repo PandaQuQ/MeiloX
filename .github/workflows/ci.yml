@@ -48,26 +48,35 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Build debug APK and run unit tests
+      - name: Build debug + minified devRelease APKs and run unit tests
         run: >-
           ./gradlew --no-daemon
-          assembleDebug testDebugUnitTest
+          assembleDebug assembleDevRelease testDebugUnitTest
           -Pglasmio.source=true
           -Pmei.buildCommitSha=${{ github.sha }}
           -Pmei.ciRunNumber=${{ github.run_number }}
           -Pmei.ciRunAttempt=${{ github.run_attempt }}
 
-      - name: Artifact name (branch + run number)
+      - name: Artifact names (branch + run number)
         id: art
         run: |
           branch="${{ github.head_ref || github.ref_name }}"
-          echo "name=meilox-debug-${branch//\//-}-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          slug="${branch//\//-}"
+          echo "debug=meilox-debug-${slug}-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "devrelease=meilox-devrelease-${slug}-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.art.outputs.name }}
+          name: ${{ steps.art.outputs.debug }}
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload devRelease APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.art.outputs.devrelease }}
+          path: app/build/outputs/apk/devRelease/*.apk
           if-no-files-found: error
 
       - name: Upload test reports
