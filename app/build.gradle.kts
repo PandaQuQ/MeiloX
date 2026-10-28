@@ -132,6 +132,16 @@ android {
                 "netease-sdk-rules.pro"
             )
         }
+        // Minified, debug-signed sibling of release for AA heat/lag A/B vs assembleDebug.
+        // Same package as debug (.debug) so it overwrites the CI debug APK; no release secrets.
+        create("devRelease") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".debug"
+            matchingFallbacks += listOf("release")
+            signingConfig = signingConfigs.getByName("debug")
+            // Match debug's "MeiloX Dev" label (debug uses src/debug/res strings on AA branches).
+            resValue("string", "app_name", "MeiloX Dev")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
