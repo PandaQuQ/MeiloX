@@ -156,6 +156,8 @@ class MusicService : MediaLibraryService(),
     private lateinit var flymeLyricsPublisher: FlymeStatusBarLyricsPublisher
     private lateinit var flymeNotificationProvider: FlymeLyricsNotificationProvider
     private lateinit var systemLyricsBridge: SystemLyricsBridge
+    private lateinit var externalMediaPlayer: ExternalMediaPlayer
+    private lateinit var androidAutoLyricsPublisher: AndroidAutoLyricsPublisher
 
     @Inject
     lateinit var lyricManager: com.ljyh.mei.utils.lyric.LyricManager
@@ -446,7 +448,8 @@ class MusicService : MediaLibraryService(),
             homeRepository = homeRepository,
             songRepository = songRepository,
         )
-        mediaSession = MediaLibrarySession.Builder(this, ExternalMediaPlayer(player), LibrarySessionCallback())
+        externalMediaPlayer = ExternalMediaPlayer(player)
+        mediaSession = MediaLibrarySession.Builder(this, externalMediaPlayer, LibrarySessionCallback())
             .setSessionExtras(Bundle().apply {
                 putBoolean(MediaConstants.EXTRAS_KEY_SLOT_RESERVATION_SEEK_TO_PREV, true)
                 putBoolean(MediaConstants.EXTRAS_KEY_SLOT_RESERVATION_SEEK_TO_NEXT, true)
@@ -504,6 +507,9 @@ class MusicService : MediaLibraryService(),
             playerRepository.songLikes.collect { updateNotificationButtons() }
         }
         systemLyricsBridge = SystemLyricsBridge(this, player, lyricManager, mediaSession)
+        androidAutoLyricsPublisher = AndroidAutoLyricsPublisher(
+            this, player, externalMediaPlayer, lyricManager, scope,
+        )
         flymeLyricsPublisher = FlymeStatusBarLyricsPublisher(this, player, lyricManager, flymeNotificationProvider)
         scope.launch {
             context.dataStore.data.map { it[CookieKey] }.distinctUntilChanged().drop(1).collect {
@@ -1173,12 +1179,25 @@ class MusicService : MediaLibraryService(),
                 parentId = null,
                 result = if (allowSensitive) "accepted:sensitive" else "accepted:browse",
             )
+            if (::androidAutoLyricsPublisher.isInitialized) {
+                androidAutoLyricsPublisher.onControllerConnected(controller)
+            }
             return Futures.immediateFuture(
                 MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
                     .setAvailableSessionCommands(sessionCommands)
                     .setAvailablePlayerCommands(playerCommands)
                     .build(),
             )
+        }
+
+        override fun onDisconnected(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+        ) {
+            if (::androidAutoLyricsPublisher.isInitialized) {
+                androidAutoLyricsPublisher.onControllerDisconnected(controller)
+            }
+            super.onDisconnected(session, controller)
         }
 
         override fun onGetLibraryRoot(
@@ -1336,6 +1355,7 @@ class MusicService : MediaLibraryService(),
         if (::flymeLyricsPublisher.isInitialized) flymeLyricsPublisher.release()
         NotificationManagerCompat.from(this).cancel(FLOATING_LYRICS_NOTIFICATION_ID)
         if (::systemLyricsBridge.isInitialized) systemLyricsBridge.release()
+        if (::androidAutoLyricsPublisher.isInitialized) androidAutoLyricsPublisher.release()
         mediaUriProvider.onSourceResolved = null
         availableQualitiesJob?.cancel()
         sourceRecoveryJob?.cancel()

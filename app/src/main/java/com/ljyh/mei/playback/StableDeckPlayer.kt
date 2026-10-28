@@ -20,6 +20,10 @@ import java.io.ByteArrayOutputStream
 internal class ExternalMediaPlayer(private val source: Player) : ForwardingSimpleBasePlayer(source) {
     private var lyricMediaId: String? = null
     private var lyric: String? = null
+    /** Android Auto now-playing overlay: title = lyric, artist/subtitle = "歌名 · 歌手". */
+    private var carMediaId: String? = null
+    private var carLyricTitle: String? = null
+    private var carSubtitle: String? = null
     private var artworkMediaId: String? = null
     private var artworkUri: Uri? = null
     private var artworkData: ByteArray? = null
@@ -29,6 +33,20 @@ internal class ExternalMediaPlayer(private val source: Player) : ForwardingSimpl
         if (lyricMediaId == mediaId && this.lyric == text) return
         lyricMediaId = mediaId
         this.lyric = text
+        invalidateState()
+    }
+
+    /**
+     * Car now-playing overlay. Pass nulls to clear and restore underlying title/artist.
+     * Artwork fields are never touched so AA does not flash the cover on each line.
+     */
+    fun setCarNowPlayingOverlay(mediaId: String?, lyricTitle: String?, subtitle: String?) {
+        val title = lyricTitle?.takeIf { it.isNotBlank() }
+        val line = subtitle?.takeIf { it.isNotBlank() }
+        if (carMediaId == mediaId && carLyricTitle == title && carSubtitle == line) return
+        carMediaId = mediaId.takeIf { title != null }
+        carLyricTitle = title
+        carSubtitle = line.takeIf { title != null }
         invalidateState()
     }
 
@@ -50,13 +68,28 @@ internal class ExternalMediaPlayer(private val source: Player) : ForwardingSimpl
     override fun getState(): State {
         val state = super.getState()
         val mediaId = source.currentMediaItem?.mediaId
-        val title = lyric.takeIf { mediaId != null && mediaId == lyricMediaId }
+        val carTitle = carLyricTitle.takeIf { mediaId != null && mediaId == carMediaId }
+        val carLine = carSubtitle.takeIf { carTitle != null }
+        val bluetoothTitle = lyric.takeIf {
+            carTitle == null && mediaId != null && mediaId == lyricMediaId
+        }
         val artwork = artworkData.takeIf {
             mediaId != null && mediaId == artworkMediaId && state.currentMetadata.artworkUri == artworkUri
         }
-        if (title == null && artwork == null) return state
+        if (carTitle == null && bluetoothTitle == null && artwork == null) return state
         val metadata = state.currentMetadata.buildUpon().apply {
-            if (title != null) setTitle(title)
+            when {
+                carTitle != null -> {
+                    setTitle(carTitle)
+                    // AA renders the line under the title from artist and/or subtitle.
+                    carLine?.let {
+                        setArtist(it)
+                        setSubtitle(it)
+                    }
+                }
+                bluetoothTitle != null -> setTitle(bluetoothTitle)
+            }
+            // Keep artworkUri/artworkData identical across lyric-line updates.
             if (artwork != null && state.currentMetadata.artworkData == null) {
                 setArtworkData(artwork, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
             }
