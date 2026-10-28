@@ -76,7 +76,7 @@ cd "$ANDROID_HOME/extras/google/auto"
 ./desktop-head-unit
 ```
 
-不想自己编译的话，可以直接装 CI 打好的调试包：在 [Actions](https://github.com/PandaQuQ/MeiloX/actions/workflows/ci.yml) 里打开对应分支最新那次 **CI**，下载构件 `meilox-debug-<编号>`，解压后运行 `adb install -r <apk文件>`。注意调试包和正式版签名不同，第一次安装前要先卸载手机上的正式版。
+不想自己编译的话，可以直接装 CI 打好的调试包：在 [Actions](https://github.com/PandaQuQ/MeiloX/actions/workflows/ci.yml) 里打开**要测的那张 PR 的分支**（比如浏览树在 `feature/aa-browse-tree`，不是 `feature/android-auto`）最新一次绿色的 **CI**，下载构件 `meilox-debug-<编号>`，解压后运行 `adb install -r <apk文件>`。注意调试包和正式版签名不同，第一次安装前要先卸载手机上的正式版。
 
 截图给 UI 验收：在运行 DHU 的那个终端里输入 `day` 或 `night` 切换白天和夜间模式，再输入 `screenshot day.png` 或 `screenshot night.png` 存图。首页、媒体库里的歌单网格、一个歌单里的歌曲列表、正在播放页，这 4 个界面白天和夜间各截一张。
 
