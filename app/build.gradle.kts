@@ -139,8 +139,8 @@ android {
             applicationIdSuffix = ".debug"
             matchingFallbacks += listOf("release")
             signingConfig = signingConfigs.getByName("debug")
-            // Match debug's "MeiloX Dev" label (debug uses src/debug/res strings on AA branches).
-            resValue("string", "app_name", "MeiloX Dev")
+            // Label "MeiloX Dev" via app/src/devRelease/res/**/strings.xml (app_name),
+            // same pattern as debug's src/debug/res override (resValue needs buildFeatures.resValues).
         }
     }
     compileOptions {
