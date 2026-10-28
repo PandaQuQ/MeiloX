@@ -6,5 +6,20 @@
             android:exported="true"
             android:label="SF Symbols Audit"
             android:theme="@style/Theme.Music" />
+        <activity
+            android:name=".ui.AaBrowseDiagnosticsActivity"
+            android:exported="true"
+            android:label="AA 诊断"
+            android:theme="@style/Theme.Music">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <provider
+            android:name=".playback.AaBrowseDiagnosticsInitProvider"
+            android:authorities="${applicationId}.aa.browse.diagnostics"
+            android:exported="false"
+            android:initOrder="100" />
     </application>
 </manifest>

@@ -89,26 +89,55 @@ class AndroidAutoLibrary(
         controller: MediaSession.ControllerInfo,
         params: LibraryParams?,
     ): ListenableFuture<LibraryResult<MediaItem>> {
-        if (!allowsBrowse(controller)) {
-            return Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_PERMISSION_DENIED))
-        }
+        // Open to every controller — car hosts may use unexpected package/uid or legacy MediaBrowserCompat.
         lastBrowserPackage = controller.packageName
-        val extras = Bundle().apply {
-            putInt(
-                MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE,
-                MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM,
+        return try {
+            if (params?.isRecent == true) {
+                // AA asks for the recent root on connect for resumption; never error here.
+                val recent = browsableItem(
+                    mediaId = HISTORY,
+                    title = context.getString(R.string.app_tab_library_history),
+                )
+                recordDiag(controller, "onGetLibraryRoot", "isRecent", "success:HISTORY")
+                Futures.immediateFuture(LibraryResult.ofItem(recent, params))
+            } else {
+                val extras = Bundle().apply {
+                    putInt(
+                        MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE,
+                        MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM,
+                    )
+                    putInt(
+                        MediaConstants.EXTRAS_KEY_CONTENT_STYLE_PLAYABLE,
+                        MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM,
+                    )
+                }
+                val root = browsableItem(
+                    mediaId = ROOT,
+                    title = context.getString(R.string.app_name),
+                    extras = extras,
+                )
+                recordDiag(controller, "onGetLibraryRoot", "root", "success:ROOT")
+                Futures.immediateFuture(LibraryResult.ofItem(root, params))
+            }
+        } catch (error: Exception) {
+            Timber.tag(TAG).e(error, "onGetLibraryRoot failed (isRecent=%s)", params?.isRecent)
+            recordDiag(
+                controller,
+                "onGetLibraryRoot",
+                if (params?.isRecent == true) "isRecent" else "root",
+                "exception:${error.message}",
             )
-            putInt(
-                MediaConstants.EXTRAS_KEY_CONTENT_STYLE_PLAYABLE,
-                MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM,
+            // Cold-start / process-isolation failures must not break AA connect.
+            val fallbackId = if (params?.isRecent == true) HISTORY else ROOT
+            val fallbackTitle = if (params?.isRecent == true) {
+                context.getString(R.string.app_tab_library_history)
+            } else {
+                context.getString(R.string.app_name)
+            }
+            Futures.immediateFuture(
+                LibraryResult.ofItem(browsableItem(fallbackId, fallbackTitle), params),
             )
         }
-        val root = browsableItem(
-            mediaId = ROOT,
-            title = context.getString(R.string.app_name),
-            extras = extras,
-        )
-        return Futures.immediateFuture(LibraryResult.ofItem(root, params))
     }
 
     fun onGetChildren(
@@ -118,18 +147,19 @@ class AndroidAutoLibrary(
         pageSize: Int,
         params: LibraryParams?,
     ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
-        if (!allowsBrowse(controller)) {
-            return Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_PERMISSION_DENIED))
-        }
         lastBrowserPackage = controller.packageName
         val future = SettableFuture.create<LibraryResult<ImmutableList<MediaItem>>>()
         scope.launch {
             try {
                 val items = loadChildren(parentId)
-                future.set(LibraryResult.ofItemList(paginate(items, page, pageSize), params))
+                val pageItems = paginate(items, page, pageSize)
+                recordDiag(controller, "onGetChildren", parentId, "success:${pageItems.size}")
+                future.set(LibraryResult.ofItemList(pageItems, params))
             } catch (error: Exception) {
                 Timber.tag(TAG).e(error, "onGetChildren failed for %s", parentId)
-                future.set(LibraryResult.ofError(SessionError.ERROR_UNKNOWN))
+                recordDiag(controller, "onGetChildren", parentId, "exception:${error.message}")
+                // Prefer empty-but-successful over error so the car launcher keeps the app.
+                future.set(LibraryResult.ofItemList(ImmutableList.of(), params))
             }
         }
         return future
@@ -139,25 +169,45 @@ class AndroidAutoLibrary(
         controller: MediaSession.ControllerInfo,
         mediaId: String,
     ): ListenableFuture<LibraryResult<MediaItem>> {
-        if (!allowsBrowse(controller)) {
-            return Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_PERMISSION_DENIED))
-        }
         lastBrowserPackage = controller.packageName
         val future = SettableFuture.create<LibraryResult<MediaItem>>()
         scope.launch {
             try {
                 val item = resolveItem(mediaId)
                 if (item != null) {
+                    recordDiag(controller, "onGetItem", mediaId, "success")
                     future.set(LibraryResult.ofItem(item, /* params= */ null))
                 } else {
+                    recordDiag(controller, "onGetItem", mediaId, "error:BAD_VALUE")
                     future.set(LibraryResult.ofError(SessionError.ERROR_BAD_VALUE))
                 }
             } catch (error: Exception) {
                 Timber.tag(TAG).e(error, "onGetItem failed for %s", mediaId)
+                recordDiag(controller, "onGetItem", mediaId, "exception:${error.message}")
                 future.set(LibraryResult.ofError(SessionError.ERROR_UNKNOWN))
             }
         }
         return future
+    }
+
+    fun onSearch(
+        controller: MediaSession.ControllerInfo,
+        query: String,
+        params: LibraryParams?,
+    ): ListenableFuture<LibraryResult<Void>> {
+        recordDiag(controller, "onSearch", query, "success:empty")
+        return Futures.immediateFuture(LibraryResult.ofVoid(params))
+    }
+
+    fun onGetSearchResult(
+        controller: MediaSession.ControllerInfo,
+        query: String,
+        page: Int,
+        pageSize: Int,
+        params: LibraryParams?,
+    ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+        recordDiag(controller, "onGetSearchResult", query, "success:empty")
+        return Futures.immediateFuture(LibraryResult.ofItemList(ImmutableList.of(), params))
     }
 
     /** Resolve browse / AA media items into playable [MediaItem]s for the existing playback path. */
@@ -898,7 +948,11 @@ class AndroidAutoLibrary(
                 "ACG", "古风", "影视原声", "榜单",
             )
 
-        /** Packages allowed to browse/play beyond the app itself and Media3-trusted controllers. */
+        /**
+         * Packages allowed for *sensitive* custom commands (notification left/right etc.).
+         * Browse / library / play-from-browse is open to every controller — car OEM hosts
+         * often use a different package/uid (or legacy MediaBrowserCompat) than Gearhead.
+         */
         val ALLOWED_PACKAGES = setOf(
             "com.google.android.projection.gearhead",
             "com.google.android.gms",
@@ -907,14 +961,33 @@ class AndroidAutoLibrary(
             "com.google.android.googlequicksearchbox",
         )
 
-        fun allowsBrowse(controller: MediaSession.ControllerInfo, appPackage: String): Boolean {
+        /** Allow-list for sensitive custom commands only — not for browse. */
+        fun allowsSensitiveCommands(controller: MediaSession.ControllerInfo, appPackage: String): Boolean {
             if (controller.isTrusted || controller.packageName == appPackage) return true
             return controller.packageName in ALLOWED_PACKAGES
         }
+
+        @Deprecated("Browse is open; use allowsSensitiveCommands for custom cmds", ReplaceWith("allowsSensitiveCommands(controller, appPackage)"))
+        fun allowsBrowse(controller: MediaSession.ControllerInfo, appPackage: String): Boolean =
+            allowsSensitiveCommands(controller, appPackage)
     }
 
-    private fun allowsBrowse(controller: MediaSession.ControllerInfo): Boolean =
-        allowsBrowse(controller, context.packageName)
+    private fun recordDiag(
+        controller: MediaSession.ControllerInfo,
+        method: String,
+        parentId: String?,
+        result: String,
+    ) {
+        AaBrowseDiagnostics.record(
+            packageName = controller.packageName,
+            uid = controller.uid,
+            isTrusted = controller.isTrusted,
+            controllerVersion = controller.controllerVersion,
+            method = method,
+            parentId = parentId,
+            result = result,
+        )
+    }
 }
 
 private fun String.splitArtistNames(): List<String> =

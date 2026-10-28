@@ -1149,18 +1149,36 @@ class MusicService : MediaLibraryService(),
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
         ): ListenableFuture<MediaSession.ConnectionResult> {
-            val result = MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller).apply {
-                setAvailablePlayerCommands(externalTransportCommands(build().availablePlayerCommands))
+            // Browse/library open to every controller (OEM car hosts may not be allow-listed).
+            val allowSensitive = AndroidAutoLibrary.allowsSensitiveCommands(controller, packageName)
+            val baseSessionCommands =
+                MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
+            val sessionCommands = if (allowSensitive) {
+                baseSessionCommands.buildUpon()
+                    .add(SessionCommand(NOTIFICATION_LEFT_COMMAND, Bundle.EMPTY))
+                    .add(SessionCommand(NOTIFICATION_RIGHT_COMMAND, Bundle.EMPTY))
+                    .build()
+            } else {
+                baseSessionCommands
             }
-            val allowFull = AndroidAutoLibrary.allowsBrowse(controller, packageName)
-            if (!allowFull) {
-                return Futures.immediateFuture(result.build())
-            }
-            val commands = result.build().availableSessionCommands.buildUpon()
-                .add(SessionCommand(NOTIFICATION_LEFT_COMMAND, Bundle.EMPTY))
-                .add(SessionCommand(NOTIFICATION_RIGHT_COMMAND, Bundle.EMPTY))
-                .build()
-            return Futures.immediateFuture(result.setAvailableSessionCommands(commands).build())
+            val playerCommands = externalTransportCommands(
+                MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS,
+            )
+            AaBrowseDiagnostics.record(
+                packageName = controller.packageName,
+                uid = controller.uid,
+                isTrusted = controller.isTrusted,
+                controllerVersion = controller.controllerVersion,
+                method = "onConnectAsync",
+                parentId = null,
+                result = if (allowSensitive) "accepted:sensitive" else "accepted:browse",
+            )
+            return Futures.immediateFuture(
+                MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
+                    .setAvailableSessionCommands(sessionCommands)
+                    .setAvailablePlayerCommands(playerCommands)
+                    .build(),
+            )
         }
 
         override fun onGetLibraryRoot(
@@ -1187,15 +1205,30 @@ class MusicService : MediaLibraryService(),
         ): ListenableFuture<LibraryResult<MediaItem>> =
             androidAutoLibrary.onGetItem(browser, mediaId)
 
+        override fun onSearch(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            params: MediaLibraryService.LibraryParams?,
+        ): ListenableFuture<LibraryResult<Void>> =
+            androidAutoLibrary.onSearch(browser, query, params)
+
+        override fun onGetSearchResult(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            page: Int,
+            pageSize: Int,
+            params: MediaLibraryService.LibraryParams?,
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> =
+            androidAutoLibrary.onGetSearchResult(browser, query, page, pageSize, params)
+
         override fun onAddMediaItems(
             mediaSession: MediaSession,
             controller: MediaSession.ControllerInfo,
             mediaItems: List<MediaItem>,
         ): ListenableFuture<List<MediaItem>> {
-            if (!AndroidAutoLibrary.allowsBrowse(controller, packageName)) {
-                return Futures.immediateFuture(mediaItems)
-            }
-            // App-internal queues are already fully described; only resolve AA / sparse items.
+            // Always resolve sparse / AA browse items for any caller so car playback works.
             val needsResolve = mediaItems.any { item ->
                 item.localConfiguration?.tag !is com.ljyh.mei.data.model.MediaMetadata &&
                     (item.mediaMetadata.title.isNullOrBlank() || item.localConfiguration == null)
@@ -1213,6 +1246,7 @@ class MusicService : MediaLibraryService(),
             startIndex: Int,
             startPositionMs: Long,
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            // Prefer in-queue selection for external/legacy controllers when the item is already queued.
             if (controller.packageName != packageName ||
                 controller.controllerVersion == MediaSession.ControllerInfo.LEGACY_CONTROLLER_VERSION
             ) {
@@ -1220,9 +1254,10 @@ class MusicService : MediaLibraryService(),
                     return Futures.immediateFuture(it)
                 }
             }
-            if (!AndroidAutoLibrary.allowsBrowse(controller, packageName)) {
-                return Futures.immediateFailedFuture(UnsupportedOperationException("Only existing queue items may be selected"))
-            }
+            // Browse → play must work for any AA / OEM caller (no package gate).
+            // Own-app UI already passes fully described items; arbitrary untrusted apps
+            // that are neither allow-listed nor selecting an existing queue item still go
+            // through resolve via onAddMediaItems — acceptable for AA hosts.
             return super.onSetMediaItems(mediaSession, controller, mediaItems, startIndex, startPositionMs)
         }
 
@@ -1232,6 +1267,9 @@ class MusicService : MediaLibraryService(),
             customCommand: SessionCommand,
             args: Bundle,
         ): ListenableFuture<SessionResult> {
+            if (!AndroidAutoLibrary.allowsSensitiveCommands(controller, packageName)) {
+                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_PERMISSION_DENIED))
+            }
             val action = when (customCommand.customAction) {
                 NOTIFICATION_LEFT_COMMAND -> notificationLeftAction
                 NOTIFICATION_RIGHT_COMMAND -> notificationRightAction
