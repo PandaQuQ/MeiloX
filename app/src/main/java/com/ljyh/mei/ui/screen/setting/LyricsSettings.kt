@@ -31,6 +31,7 @@ import com.ljyh.mei.R
 import com.ljyh.mei.constants.LyricAutoFollowEnabledKey
 import com.ljyh.mei.constants.SystemLyricsEnabledKey
 import com.ljyh.mei.constants.BluetoothLyricsEnabledKey
+import com.ljyh.mei.constants.AndroidAutoLyricsEnabledKey
 import com.ljyh.mei.constants.FlymeStatusBarLyricsEnabledKey
 import com.ljyh.mei.constants.LyricGlowEnabledKey
 import com.ljyh.mei.constants.LyricLiftEnabledKey
@@ -72,6 +73,7 @@ fun LyricsSettings() {
     val (autoFollow, onAutoFollow) = rememberPreference(LyricAutoFollowEnabledKey, true)
     val (systemLyrics, onSystemLyrics) = rememberPreference(SystemLyricsEnabledKey, true)
     val (bluetoothLyrics, onBluetoothLyrics) = rememberPreference(BluetoothLyricsEnabledKey, false)
+    val (androidAutoLyrics, onAndroidAutoLyrics) = rememberPreference(AndroidAutoLyricsEnabledKey, true)
     val (flymeLyrics, onFlymeLyrics) = rememberPreference(FlymeStatusBarLyricsEnabledKey, false)
     val (floatingTranslation, onFloatingTranslation) = rememberPreference(FloatingLyricsTranslationKey, true)
     val (floatingNext, onFloatingNext) = rememberPreference(FloatingLyricsNextLineKey, true)
@@ -122,6 +124,7 @@ fun LyricsSettings() {
         item {
             SettingsGroup(stringResource(R.string.external_devices_settings)) {
                 LyricsToggleRow(stringResource(R.string.bluetooth_lyrics_enabled), bluetoothLyrics, onBluetoothLyrics)
+                LyricsToggleRow(stringResource(R.string.android_auto_lyrics_enabled), androidAutoLyrics, onAndroidAutoLyrics)
             }
         }
         item {

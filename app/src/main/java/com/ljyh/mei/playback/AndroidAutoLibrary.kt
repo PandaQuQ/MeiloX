@@ -967,6 +967,23 @@ class AndroidAutoLibrary(
             return controller.packageName in ALLOWED_PACKAGES
         }
 
+        /**
+         * Controllers that represent Android Auto / car hosts (not SystemUI/GMS).
+         * Used to gate car now-playing lyric overlay without affecting the phone notification.
+         */
+        val ANDROID_AUTO_PACKAGES = setOf(
+            "com.google.android.projection.gearhead",
+            "com.google.android.carassistant",
+        )
+
+        fun isAndroidAutoController(controller: MediaSession.ControllerInfo): Boolean {
+            val pkg = controller.packageName
+            if (pkg in ANDROID_AUTO_PACKAGES) return true
+            // OEM / DHU variants often keep "gearhead" or "projection" in the package name.
+            return pkg.contains("gearhead", ignoreCase = true) ||
+                pkg.contains("projection.gearhead", ignoreCase = true)
+        }
+
         @Deprecated("Browse is open; use allowsSensitiveCommands for custom cmds", ReplaceWith("allowsSensitiveCommands(controller, appPackage)"))
         fun allowsBrowse(controller: MediaSession.ControllerInfo, appPackage: String): Boolean =
             allowsSensitiveCommands(controller, appPackage)
