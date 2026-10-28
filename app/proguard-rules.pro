@@ -196,3 +196,20 @@
 -keep class com.hchen.superlyricapi.* { *; }
 # SuperLyricApi compiles this framework entry point against its compile-only stubs.
 -dontwarn android.os.ServiceManager
+
+
+# Android Auto / Media3 session entry points (devRelease minify).
+# Manifest-referenced components are usually kept already; these make the keep explicit.
+-keep class com.ljyh.mei.playback.MusicService { *; }
+-keep class com.ljyh.mei.playback.ArtworkContentProvider { *; }
+-keep class androidx.media3.session.MediaLibraryService { *; }
+-keep class androidx.media3.session.MediaSessionService { *; }
+-keep class android.support.v4.media.MediaBrowserCompat { *; }
+-keep class android.support.v4.media.session.** { *; }
+-keep class androidx.media.MediaBrowserServiceCompat { *; }
+-keepclassmembers class * extends androidx.media3.session.MediaLibraryService {
+    public <init>(...);
+}
+-keepclassmembers class * extends android.service.media.MediaBrowserService {
+    public <init>(...);
+}
