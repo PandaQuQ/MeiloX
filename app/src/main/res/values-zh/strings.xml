@@ -834,4 +834,5 @@
     <string name="android_auto_login_required">请先在手机上登录</string>
     <string name="android_auto_empty">暂无内容</string>
     <string name="android_auto_error">加载失败</string>
+    <string name="android_auto_track_count">%1$d 首</string>
 </resources>

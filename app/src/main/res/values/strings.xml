@@ -438,7 +438,7 @@
     <string name="app_tab_library_podcasts">Subscribed Podcasts</string>
     <string name="app_tab_library_downloads">Downloads</string>
     <string name="app_tab_library_cloud">Cloud Music</string>
-    <string name="app_tab_library_history">Listening History</string>
+    <string name="app_tab_library_history">History</string>
     <string name="app_tab_search">Search</string>
     <string name="library_page_songs">Songs</string>
     <string name="library_page_playlists">Playlists</string>
@@ -835,4 +835,5 @@
     <string name="android_auto_login_required">Please sign in on your phone</string>
     <string name="android_auto_empty">Nothing here yet</string>
     <string name="android_auto_error">Unable to load</string>
+    <string name="android_auto_track_count">%1$d songs</string>
 </resources>

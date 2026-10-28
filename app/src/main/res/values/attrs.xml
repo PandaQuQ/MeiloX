@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material-style attrs so Theme.Music can expose colorOnPrimary to Android Auto
+         without depending on AppCompat/Material Components XML themes. -->
+    <attr name="colorPrimary" format="color|reference" />
+    <attr name="colorPrimaryDark" format="color|reference" />
+    <attr name="colorAccent" format="color|reference" />
+    <attr name="colorOnPrimary" format="color|reference" />
+</resources>

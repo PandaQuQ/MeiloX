@@ -56,6 +56,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Android Auto browse tree matching the phone bottom bar (designer checklist):
@@ -80,6 +81,12 @@ class AndroidAutoLibrary(
     private val songRepository: SongRepository,
 ) {
     private val gson = Gson()
+
+    /**
+     * Last [onGetChildren] pages keyed by parentId. Used to expand a tapped track into the
+     * full parent queue without a second network round-trip when still warm.
+     */
+    private val childrenCache = ConcurrentHashMap<String, List<MediaItem>>()
 
     /** Last MediaLibrary browser package — used when granting artwork content:// read. */
     @Volatile
@@ -224,68 +231,239 @@ class AndroidAutoLibrary(
         return future
     }
 
-    private suspend fun loadChildren(parentId: String): List<MediaItem> = when {
-        parentId == ROOT || parentId.isEmpty() -> rootTabs()
-        parentId == HOME -> homeChildren()
-        parentId == EXPLORE -> exploreChildren()
-        parentId == LIBRARY -> libraryFlatChildren()
-        parentId == HISTORY -> recentTracks()
-        // Legacy section ids (pre-flatten) still resolve for any cached MediaIds.
-        parentId == LIB_PLAYLISTS -> playlistChildren()
-        parentId == LIB_ALBUMS -> albumChildren()
-        parentId == LIB_SONGS -> likedTracks()
-        parentId == LIB_DOWNLOADS -> downloadTracks()
-        parentId == LIB_CLOUD -> cloudTracks()
-        parentId == HOME_DAILY -> dailyRecommendTracks()
-        parentId.startsWith(EXPLORE_CAT_PREFIX) ->
-            explorePlaylists(
-                Uri.decode(parentId.removePrefix(EXPLORE_CAT_PREFIX)),
-                groupTitle = Uri.decode(parentId.removePrefix(EXPLORE_CAT_PREFIX)),
-            )
-        parentId.startsWith(PLAYLIST_PREFIX) -> playlistTracks(parentId.removePrefix(PLAYLIST_PREFIX))
-        parentId.startsWith(ALBUM_PREFIX) -> albumTracks(parentId.removePrefix(ALBUM_PREFIX))
-        else -> emptyList()
+    /**
+     * Expand a browse tap into the full parent queue (playlist / album / daily / history / …),
+     * starting at the tapped song. Playback [MediaItem.mediaId] stays the bare song id so
+     * [MediaUriProvider] and the phone path keep working.
+     */
+    fun resolveSetMediaItems(
+        mediaItems: List<MediaItem>,
+        startIndex: Int,
+        startPositionMs: Long,
+    ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+        val future = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
+        scope.launch {
+            try {
+                future.set(expandBrowseToQueue(mediaItems, startIndex, startPositionMs))
+            } catch (error: Exception) {
+                Timber.tag(TAG).e(error, "resolveSetMediaItems failed")
+                future.setException(error)
+            }
+        }
+        return future
     }
 
-    private suspend fun resolveItem(mediaId: String): MediaItem? = when {
-        mediaId == ROOT -> browsableItem(ROOT, context.getString(R.string.app_name))
-        mediaId in setOf(HOME, EXPLORE, LIBRARY, HISTORY) ->
-            rootTabs().firstOrNull { it.mediaId == mediaId }
-        mediaId in setOf(LIB_PLAYLISTS, LIB_ALBUMS, LIB_SONGS, LIB_DOWNLOADS, LIB_CLOUD) ->
-            libraryChildren().firstOrNull { it.mediaId == mediaId }
-        mediaId == HOME_DAILY ->
-            browsableItem(HOME_DAILY, DateUtils.getGreeting(), grid = false)
-        mediaId.startsWith(EXPLORE_CAT_PREFIX) ||
-            mediaId.startsWith(PLAYLIST_PREFIX) ||
-            mediaId.startsWith(ALBUM_PREFIX) -> {
-            // Best-effort: rebuild parent listing and pick matching child.
-            val parent = when {
-                mediaId.startsWith(EXPLORE_CAT_PREFIX) -> EXPLORE
-                mediaId.startsWith(PLAYLIST_PREFIX) -> LIB_PLAYLISTS
-                else -> LIB_ALBUMS
-            }
-            loadChildren(parent).firstOrNull { it.mediaId == mediaId }
+    private suspend fun expandBrowseToQueue(
+        mediaItems: List<MediaItem>,
+        startIndex: Int,
+        startPositionMs: Long,
+    ): MediaSession.MediaItemsWithStartPosition {
+        // Multi-item requests (rare from AA) — just resolve each; do not invent a parent.
+        if (mediaItems.size != 1) {
+            val resolved = mediaItems.map { resolvePlayable(it) }
+            val index = startIndex.coerceIn(0, (resolved.size - 1).coerceAtLeast(0))
+            return MediaSession.MediaItemsWithStartPosition(resolved, index, startPositionMs)
         }
-        else -> resolveTrackById(mediaId)
+        val requested = mediaItems.single()
+        val (parentId, songId) = parseTrackMediaId(requested.mediaId)
+        val expanded = if (!parentId.isNullOrBlank()) {
+            queueFromParent(parentId, songId, requested)
+        } else {
+            // Bare song id: try last browse pages (home song blocks, etc.).
+            queueFromCachedParents(songId, requested)
+        }
+        if (expanded != null) {
+            return MediaSession.MediaItemsWithStartPosition(
+                expanded.first,
+                expanded.second,
+                /* startPositionMs= */ 0L,
+            )
+        }
+        val single = resolvePlayable(requested)
+        return MediaSession.MediaItemsWithStartPosition(listOf(single), 0, startPositionMs)
+    }
+
+    private suspend fun queueFromParent(
+        parentId: String,
+        songId: String,
+        requested: MediaItem,
+    ): Pair<List<MediaItem>, Int>? {
+        val browseItems = loadChildrenCached(parentId)
+        // Mixed tab parents (Home / Explore / Library) hold several song blocks — only queue
+        // playable siblings that share the tapped item's CONTENT_STYLE_GROUP_TITLE.
+        val sourceItems = if (parentId == HOME || parentId == EXPLORE || parentId == LIBRARY) {
+            val match = browseItems.firstOrNull {
+                it.mediaMetadata.isPlayable == true && songIdFromMediaId(it.mediaId) == songId
+            } ?: return null
+            val group = match.mediaMetadata.extras
+                ?.getString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE)
+            browseItems.filter {
+                it.mediaMetadata.isPlayable == true &&
+                    (group == null || group == it.mediaMetadata.extras
+                        ?.getString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE))
+            }
+        } else {
+            browseItems
+        }
+        val playables = playableQueueItems(sourceItems, requested)
+        if (playables.isEmpty()) return null
+        val index = playables.indexOfFirst { it.mediaId == songId }.takeIf { it >= 0 }
+            ?: playables.indexOfFirst {
+                songIdFromMediaId(it.mediaId) == songId
+            }.takeIf { it >= 0 }
+            ?: 0
+        return playables to index
+    }
+
+    private suspend fun queueFromCachedParents(
+        songId: String,
+        requested: MediaItem,
+    ): Pair<List<MediaItem>, Int>? {
+        // Prefer the parent whose cached children contain this song (most recent wins via scan).
+        val entries = childrenCache.entries.toList().asReversed()
+        for ((parentId, children) in entries) {
+            if (parentId == ROOT || parentId == HOME || parentId == EXPLORE || parentId == LIBRARY) {
+                // Mixed tabs: only queue playable siblings that share the same group title.
+                val match = children.firstOrNull {
+                    it.mediaMetadata.isPlayable == true && songIdFromMediaId(it.mediaId) == songId
+                } ?: continue
+                val group = match.mediaMetadata.extras
+                    ?.getString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE)
+                val siblings = children.filter {
+                    it.mediaMetadata.isPlayable == true &&
+                        (group == null || group == it.mediaMetadata.extras
+                            ?.getString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE))
+                }
+                val playables = playableQueueItems(siblings, requested)
+                val index = playables.indexOfFirst { it.mediaId == songId }.takeIf { it >= 0 } ?: 0
+                if (playables.isNotEmpty()) return playables to index
+            } else {
+                val has = children.any {
+                    it.mediaMetadata.isPlayable == true && songIdFromMediaId(it.mediaId) == songId
+                }
+                if (has) {
+                    return queueFromParent(parentId, songId, requested)
+                }
+            }
+        }
+        return null
+    }
+
+    private suspend fun playableQueueItems(
+        browseItems: List<MediaItem>,
+        requested: MediaItem,
+    ): List<MediaItem> {
+        val out = ArrayList<MediaItem>()
+        for (item in browseItems) {
+            if (item.mediaMetadata.isPlayable != true) continue
+            if (item.mediaId == LOGIN_ID || item.mediaId == EMPTY_ID || item.mediaId == ERROR_ID) continue
+            out += resolvePlayable(item)
+        }
+        // If the tapped item somehow wasn't in the parent list, still include it.
+        val reqSong = songIdFromMediaId(requested.mediaId)
+        if (out.none { it.mediaId == reqSong }) {
+            out.add(0, resolvePlayable(requested))
+        }
+        return out
+    }
+
+    private suspend fun loadChildrenCached(parentId: String): List<MediaItem> {
+        childrenCache[parentId]?.let { return it }
+        return loadChildren(parentId)
+    }
+
+    private suspend fun loadChildren(parentId: String): List<MediaItem> {
+        val items = when {
+            parentId == ROOT || parentId.isEmpty() -> rootTabs()
+            parentId == HOME -> homeChildren()
+            parentId == EXPLORE -> exploreChildren()
+            parentId == LIBRARY -> libraryFlatChildren()
+            parentId == HISTORY -> recentTracks(parentId = HISTORY)
+            // Legacy section ids (pre-flatten) still resolve for any cached MediaIds.
+            parentId == LIB_PLAYLISTS -> playlistChildren()
+            parentId == LIB_ALBUMS -> albumChildren()
+            parentId == LIB_SONGS -> likedTracks(parentId = LIB_SONGS)
+            parentId == LIB_DOWNLOADS -> downloadTracks(parentId = LIB_DOWNLOADS)
+            parentId == LIB_CLOUD -> cloudTracks(parentId = LIB_CLOUD)
+            parentId == HOME_DAILY -> dailyRecommendTracks(parentId = HOME_DAILY)
+            parentId.startsWith(EXPLORE_CAT_PREFIX) ->
+                explorePlaylists(
+                    Uri.decode(parentId.removePrefix(EXPLORE_CAT_PREFIX)),
+                    groupTitle = Uri.decode(parentId.removePrefix(EXPLORE_CAT_PREFIX)),
+                )
+            parentId.startsWith(PLAYLIST_PREFIX) ->
+                playlistTracks(parentId.removePrefix(PLAYLIST_PREFIX), parentId = parentId)
+            parentId.startsWith(ALBUM_PREFIX) ->
+                albumTracks(parentId.removePrefix(ALBUM_PREFIX), parentId = parentId)
+            else -> emptyList()
+        }
+        if (parentId.isNotEmpty() && items.isNotEmpty()) {
+            childrenCache[parentId] = items
+        }
+        return items
+    }
+
+    private suspend fun resolveItem(mediaId: String): MediaItem? {
+        val (parentId, songId) = parseTrackMediaId(mediaId)
+        if (!parentId.isNullOrBlank()) {
+            loadChildrenCached(parentId).firstOrNull {
+                songIdFromMediaId(it.mediaId) == songId || it.mediaId == mediaId
+            }?.let { return it }
+            return resolveTrackById(songId)
+        }
+        return when {
+            mediaId == ROOT -> browsableItem(ROOT, context.getString(R.string.app_name))
+            mediaId in setOf(HOME, EXPLORE, LIBRARY, HISTORY) ->
+                rootTabs().firstOrNull { it.mediaId == mediaId }
+            mediaId in setOf(LIB_PLAYLISTS, LIB_ALBUMS, LIB_SONGS, LIB_DOWNLOADS, LIB_CLOUD) ->
+                libraryChildren().firstOrNull { it.mediaId == mediaId }
+            mediaId == HOME_DAILY ->
+                browsableItem(HOME_DAILY, DateUtils.getGreeting(), grid = false)
+            mediaId.startsWith(EXPLORE_CAT_PREFIX) ||
+                mediaId.startsWith(PLAYLIST_PREFIX) ||
+                mediaId.startsWith(ALBUM_PREFIX) -> {
+                val parent = when {
+                    mediaId.startsWith(EXPLORE_CAT_PREFIX) -> EXPLORE
+                    mediaId.startsWith(PLAYLIST_PREFIX) -> LIB_PLAYLISTS
+                    else -> LIB_ALBUMS
+                }
+                loadChildren(parent).firstOrNull { it.mediaId == mediaId }
+            }
+            else -> resolveTrackById(mediaId)
+        }
     }
 
     private suspend fun resolvePlayable(item: MediaItem): MediaItem {
+        val songId = songIdFromMediaId(item.mediaId)
         val existing = item.localConfiguration?.tag
         if (existing is com.ljyh.mei.data.model.MediaMetadata) {
-            return item.withNowPlayingArtwork()
+            return item.forPlayback(songId).withNowPlayingArtwork()
         }
         val title = item.mediaMetadata.title
         if (item.localConfiguration != null && !title.isNullOrBlank()) {
-            return item.withNowPlayingArtwork()
+            return item.forPlayback(songId).withNowPlayingArtwork()
         }
-        return resolveTrackById(item.mediaId) ?: item
+        return resolveTrackById(songId) ?: item.forPlayback(songId)
+    }
+
+    /** Ensure ExoPlayer / MediaUriProvider see the bare NetEase song id as [MediaItem.mediaId]. */
+    private fun MediaItem.forPlayback(songId: String = songIdFromMediaId(mediaId)): MediaItem {
+        if (mediaId == songId && localConfiguration?.uri?.toString() == songId) return this
+        val tag = localConfiguration?.tag
+        val builder = buildUpon()
+            .setMediaId(songId)
+            .setUri(songId)
+            .setCustomCacheKey(songId)
+        if (tag != null) builder.setTag(tag)
+        return builder.build()
     }
 
     private fun rootTabs(): List<MediaItem> = listOf(
-        tabItem(HOME, R.string.app_tab_home, R.drawable.ic_aa_tab_home),
-        tabItem(EXPLORE, R.string.app_tab_explore, R.drawable.ic_aa_tab_explore),
-        tabItem(LIBRARY, R.string.app_tab_library, R.drawable.ic_aa_tab_library),
-        tabItem(HISTORY, R.string.app_tab_library_history, R.drawable.ic_aa_tab_history),
+        // BROWSABLE=GRID on these parents → playlist/album covers render as a grid in AA.
+        tabItem(HOME, R.string.app_tab_home, R.drawable.ic_aa_tab_home, gridChildren = true),
+        tabItem(EXPLORE, R.string.app_tab_explore, R.drawable.ic_aa_tab_explore, gridChildren = true),
+        tabItem(LIBRARY, R.string.app_tab_library, R.drawable.ic_aa_tab_library, gridChildren = true),
+        tabItem(HISTORY, R.string.app_tab_library_history, R.drawable.ic_aa_tab_history, gridChildren = false),
     )
 
     private fun libraryChildren(): List<MediaItem> = listOf(
@@ -439,11 +617,11 @@ class AndroidAutoLibrary(
         }
     }
 
-    private suspend fun dailyRecommendTracks(): List<MediaItem> {
+    private suspend fun dailyRecommendTracks(parentId: String = HOME_DAILY): List<MediaItem> {
         if (!isLoggedIn()) return listOf(loginRequiredItem())
         return when (val result = playlistRepository.getEveryDayRecommendSongs()) {
             is Resource.Success -> result.data.data.dailySongs
-                .map { it.toMediaMetadata().toPlayableMediaItem() }
+                .map { it.toMediaMetadata().toPlayableMediaItem(parentId = parentId) }
                 .ifEmpty { listOf(messageItem(EMPTY_ID, context.getString(R.string.android_auto_empty))) }
             is Resource.Error -> listOf(
                 messageItem(
@@ -545,14 +723,14 @@ class AndroidAutoLibrary(
             .build()
     }
 
-    private suspend fun recentTracks(): List<MediaItem> {
+    private suspend fun recentTracks(parentId: String = HISTORY): List<MediaItem> {
         val local = historyRepository.getRecentSongs(limit = 50).map { history ->
-            history.song.toMediaMetadata().toPlayableMediaItem()
+            history.song.toMediaMetadata().toPlayableMediaItem(parentId = parentId)
         }
         if (local.isNotEmpty()) return local
         if (!isLoggedIn()) return listOf(loginRequiredItem())
         return runCatching {
-            meloXRepository.recentSongs(limit = 50).map { it.toPlayableMediaItem() }
+            meloXRepository.recentSongs(limit = 50).map { it.toPlayableMediaItem(parentId = parentId) }
         }.getOrElse {
             Timber.tag(TAG).w(it, "remote recent songs failed")
             listOf(messageItem(ERROR_ID, context.getString(R.string.android_auto_error)))
@@ -567,10 +745,16 @@ class AndroidAutoLibrary(
             libraryCollections.allPlaylists(account)
                 .filterNot { it.specialType == 5 && it.creator.userId.toString() == account.userId }
                 .map { playlist ->
+                    val owned = playlist.userId.toString() == account.userId ||
+                        playlist.creator.userId.toString() == account.userId
                     browsableItem(
                         mediaId = PLAYLIST_PREFIX + playlist.id,
                         title = playlist.name,
-                        subtitle = playlist.creator.nickname,
+                        subtitle = if (owned) {
+                            context.getString(R.string.android_auto_track_count, playlist.trackCount)
+                        } else {
+                            playlist.creator.nickname
+                        },
                         artworkUri = browseArtwork(playlist.coverImgUrl),
                         grid = true,
                     )
@@ -611,34 +795,36 @@ class AndroidAutoLibrary(
         }
     }
 
-    private suspend fun likedTracks(): List<MediaItem> {
+    private suspend fun likedTracks(parentId: String = LIB_SONGS): List<MediaItem> {
         val account = currentAccount() ?: return listOf(loginRequiredItem())
         return runCatching {
             val likedId = libraryCollections.allPlaylists(account)
                 .firstOrNull { it.specialType == 5 && it.creator.userId.toString() == account.userId }
                 ?.id
                 ?: return listOf(messageItem(EMPTY_ID, context.getString(R.string.android_auto_empty)))
-            playlistTracks(likedId.toString())
+            // Prefer playlist parent so expand reloads the liked playlist in order.
+            playlistTracks(likedId.toString(), parentId = PLAYLIST_PREFIX + likedId)
+                .also { childrenCache[parentId] = it }
         }.getOrElse {
             Timber.tag(TAG).w(it, "liked tracks failed")
             listOf(messageItem(ERROR_ID, context.getString(R.string.android_auto_error)))
         }
     }
 
-    private suspend fun downloadTracks(): List<MediaItem> {
+    private suspend fun downloadTracks(parentId: String = LIB_DOWNLOADS): List<MediaItem> {
         val songs = songRepository.getSongsBySource(SourceType.DOWNLOAD).first()
-        return songs.map { it.toMediaMetadata().toPlayableMediaItem() }
+        return songs.map { it.toMediaMetadata().toPlayableMediaItem(parentId = parentId) }
             .ifEmpty { listOf(messageItem(EMPTY_ID, context.getString(R.string.android_auto_empty))) }
     }
 
-    private suspend fun cloudTracks(): List<MediaItem> {
+    private suspend fun cloudTracks(parentId: String = LIB_CLOUD): List<MediaItem> {
         if (!isLoggedIn()) return listOf(loginRequiredItem())
         return runCatching {
             val collected = ArrayList<MediaItem>()
             var offset = 0
             do {
                 val page = meloXRepository.cloudSongs(offset = offset)
-                collected += page.songs.map { it.toPlayableMediaItem() }
+                collected += page.songs.map { it.toPlayableMediaItem(parentId = parentId) }
                 if (!page.hasMore || page.songs.isEmpty()) break
                 offset = page.nextOffset
             } while (collected.size < 400)
@@ -651,16 +837,20 @@ class AndroidAutoLibrary(
         }
     }
 
-    private suspend fun playlistTracks(playlistId: String): List<MediaItem> {
+    private suspend fun playlistTracks(
+        playlistId: String,
+        parentId: String = PLAYLIST_PREFIX + playlistId,
+    ): List<MediaItem> {
         if (!isLoggedIn()) return listOf(loginRequiredItem())
         return when (val detail = playlistRepository.getPlaylistDetail(playlistId)) {
             is Resource.Success -> {
+                // Same complete-track fetch the phone playlist screen uses — no per-song URL prefetch.
                 val tracks = runCatching {
                     playlistRepository.getCompletePlaylistTracks(detail.data)
                 }.getOrElse {
                     detail.data.playlist.tracks.map { it.toMediaMetadata() }
                 }
-                tracks.map { it.toPlayableMediaItem() }
+                tracks.map { it.toPlayableMediaItem(parentId = parentId) }
                     .ifEmpty {
                         listOf(messageItem(EMPTY_ID, context.getString(R.string.android_auto_empty)))
                     }
@@ -677,10 +867,15 @@ class AndroidAutoLibrary(
         }
     }
 
-    private suspend fun albumTracks(albumId: String): List<MediaItem> {
+    private suspend fun albumTracks(
+        albumId: String,
+        parentId: String = ALBUM_PREFIX + albumId,
+    ): List<MediaItem> {
         if (!isLoggedIn()) return listOf(loginRequiredItem())
         return when (val detail = playlistRepository.getAlbumDetail(albumId)) {
-            is Resource.Success -> detail.data.songs.map { it.toMediaMetadata().toPlayableMediaItem() }
+            is Resource.Success -> detail.data.songs.map {
+                it.toMediaMetadata().toPlayableMediaItem(parentId = parentId)
+            }
                 .ifEmpty {
                     listOf(messageItem(EMPTY_ID, context.getString(R.string.android_auto_empty)))
                 }
@@ -697,14 +892,16 @@ class AndroidAutoLibrary(
     }
 
     private suspend fun resolveTrackById(mediaId: String): MediaItem? {
-        val songId = mediaId.toLongOrNull() ?: return null
+        val bareId = songIdFromMediaId(mediaId)
+        val songId = bareId.toLongOrNull() ?: return null
         historyRepository.getHistory()
-            .firstOrNull { it.song.id == mediaId || it.song.id == songId.toString() }
-            ?.let { return it.song.toMediaMetadata().toPlayableMediaItem() }
-        return when (val detail = playerRepository.getSongDetail(mediaId)) {
+            .firstOrNull { it.song.id == bareId || it.song.id == songId.toString() }
+            ?.let { return it.song.toMediaMetadata().toPlayableMediaItem().forPlayback(bareId) }
+        return when (val detail = playerRepository.getSongDetail(bareId)) {
             is Resource.Success -> detail.data.songs.firstOrNull()
                 ?.toMediaMetadata()
                 ?.toPlayableMediaItem()
+                ?.forPlayback(bareId)
                 ?.withNowPlayingArtwork()
             else -> null
         }
@@ -722,12 +919,18 @@ class AndroidAutoLibrary(
     private fun loginRequiredItem(): MediaItem =
         messageItem(LOGIN_ID, context.getString(R.string.android_auto_login_required))
 
-    private fun tabItem(id: String, @StringRes titleRes: Int, @DrawableRes iconRes: Int): MediaItem =
+    private fun tabItem(
+        id: String,
+        @StringRes titleRes: Int,
+        @DrawableRes iconRes: Int,
+        gridChildren: Boolean = false,
+    ): MediaItem =
         browsableItem(
             mediaId = id,
             title = context.getString(titleRes),
             artworkUri = resourceUri(iconRes),
-            grid = false,
+            // grid=true → EXTRAS_KEY_CONTENT_STYLE_BROWSABLE=GRID for this parent's children.
+            grid = gridChildren,
         )
 
     private fun sectionItem(
@@ -801,6 +1004,7 @@ class AndroidAutoLibrary(
         albumId: Long = 0L,
         artistIds: List<Long> = emptyList(),
         groupTitle: String? = null,
+        parentId: String? = HOME,
     ): MediaItem {
         val metadata = com.ljyh.mei.data.model.MediaMetadata(
             id = id.toLongOrNull() ?: id.hashCode().toLong(),
@@ -815,11 +1019,12 @@ class AndroidAutoLibrary(
             duration = durationMs,
             album = com.ljyh.mei.data.model.MediaMetadata.Album(id = albumId, title = albumTitle),
         )
-        return metadata.toPlayableMediaItem(groupTitle)
+        return metadata.toPlayableMediaItem(groupTitle = groupTitle, parentId = parentId)
     }
 
     private fun com.ljyh.mei.data.model.MediaMetadata.toPlayableMediaItem(
         groupTitle: String? = null,
+        parentId: String? = null,
     ): MediaItem {
         val art = browseArtwork(coverUrl) ?: resourceUri(R.drawable.ic_aa_artwork_placeholder)
         val extras = Bundle().apply {
@@ -832,10 +1037,14 @@ class AndroidAutoLibrary(
             }
         }
         val artistLine = artists.joinToString(" / ") { it.name }
+        val songId = id.toString()
+        // Browse mediaId encodes parent so onSetMediaItems can rebuild the full queue.
+        // Uri / cache key stay the bare song id for MediaUriProvider if AA plays without expand.
+        val browseId = if (!parentId.isNullOrBlank()) encodeTrackMediaId(parentId, songId) else songId
         return MediaItem.Builder()
-            .setMediaId(id.toString())
-            .setUri(id.toString())
-            .setCustomCacheKey(id.toString())
+            .setMediaId(browseId)
+            .setUri(songId)
+            .setCustomCacheKey(songId)
             .setTag(this)
             .setMediaMetadata(
                 MediaMetadata.Builder()
@@ -856,7 +1065,7 @@ class AndroidAutoLibrary(
             .build()
     }
 
-    private fun AccountSong.toPlayableMediaItem(): MediaItem {
+    private fun AccountSong.toPlayableMediaItem(parentId: String? = null): MediaItem {
         val metadata = com.ljyh.mei.data.model.MediaMetadata(
             id = id,
             title = name,
@@ -870,10 +1079,10 @@ class AndroidAutoLibrary(
             duration = durationMs,
             album = com.ljyh.mei.data.model.MediaMetadata.Album(id = albumId, title = album),
         )
-        return metadata.toPlayableMediaItem()
+        return metadata.toPlayableMediaItem(parentId = parentId)
     }
 
-    private fun CloudSong.toPlayableMediaItem(): MediaItem {
+    private fun CloudSong.toPlayableMediaItem(parentId: String? = null): MediaItem {
         val metadata = com.ljyh.mei.data.model.MediaMetadata(
             id = id,
             title = name,
@@ -884,7 +1093,7 @@ class AndroidAutoLibrary(
             duration = durationMs,
             album = com.ljyh.mei.data.model.MediaMetadata.Album(id = 0L, title = album),
         )
-        return metadata.toPlayableMediaItem()
+        return metadata.toPlayableMediaItem(parentId = parentId)
     }
 
     private fun browseArtwork(url: String?): Uri? {
@@ -922,6 +1131,22 @@ class AndroidAutoLibrary(
 
     companion object {
         private const val TAG = "AndroidAutoLibrary"
+        /** Encodes parent container into a playable child's mediaId: `aa_playlist:1/track:2`. */
+        const val TRACK_SEP = "/track:"
+
+        fun encodeTrackMediaId(parentId: String, songId: String): String = "$parentId$TRACK_SEP$songId"
+
+        fun parseTrackMediaId(mediaId: String): Pair<String?, String> {
+            val idx = mediaId.indexOf(TRACK_SEP)
+            if (idx <= 0) return null to mediaId
+            val parent = mediaId.substring(0, idx)
+            val song = mediaId.substring(idx + TRACK_SEP.length)
+            if (parent.isBlank() || song.isBlank()) return null to mediaId
+            return parent to song
+        }
+
+        fun songIdFromMediaId(mediaId: String): String = parseTrackMediaId(mediaId).second
+
         const val ROOT = "aa_root"
         const val HOME = "aa_home"
         const val EXPLORE = "aa_explore"

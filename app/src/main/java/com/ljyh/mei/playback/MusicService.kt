@@ -1246,18 +1246,17 @@ class MusicService : MediaLibraryService(),
             startIndex: Int,
             startPositionMs: Long,
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
-            // Prefer in-queue selection for external/legacy controllers when the item is already queued.
-            if (controller.packageName != packageName ||
+            val external = controller.packageName != packageName ||
                 controller.controllerVersion == MediaSession.ControllerInfo.LEGACY_CONTROLLER_VERSION
-            ) {
+            if (external) {
+                // Prefer in-queue selection when the tapped item is already in the player queue.
                 externalQueueSelection(player, mediaItems, startPositionMs)?.let {
                     return Futures.immediateFuture(it)
                 }
+                // AA browse tap: expand parent container (playlist/album/…) into the full queue.
+                return androidAutoLibrary.resolveSetMediaItems(mediaItems, startIndex, startPositionMs)
             }
-            // Browse → play must work for any AA / OEM caller (no package gate).
-            // Own-app UI already passes fully described items; arbitrary untrusted apps
-            // that are neither allow-listed nor selecting an existing queue item still go
-            // through resolve via onAddMediaItems — acceptable for AA hosts.
+            // Own-app UI already passes fully described ListQueue items — leave unchanged.
             return super.onSetMediaItems(mediaSession, controller, mediaItems, startIndex, startPositionMs)
         }
 
