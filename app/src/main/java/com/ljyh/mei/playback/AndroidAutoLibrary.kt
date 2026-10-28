@@ -50,6 +50,9 @@ import com.ljyh.mei.utils.aaNowPlayingCoverUrl
 import com.ljyh.mei.utils.dataStore
 import com.ljyh.mei.utils.get
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import timber.log.Timber
@@ -58,7 +61,9 @@ import timber.log.Timber
  * Android Auto browse tree matching the phone bottom bar (designer checklist):
  * 首页 · 发现 · 媒体库 · 最近播放
  *
- * 媒体库 children (no podcasts): 歌单 / 专辑 / 歌曲 / 下载 / 云盘
+ * 媒体库: 歌单 / 专辑 / 歌曲 / 下载 / 云盘 as GROUP_TITLE under the tab (no intermediate
+ * section level) so the tree stays ≤3 levels: tab → list → playable.
+ * 发现: playlists/charts in GRID with category GROUP_TITLE (no category intermediate).
  *
  * Custom player buttons (like / repeat / shuffle) are intentionally out of scope (step 3).
  */
@@ -172,9 +177,10 @@ class AndroidAutoLibrary(
     private suspend fun loadChildren(parentId: String): List<MediaItem> = when {
         parentId == ROOT || parentId.isEmpty() -> rootTabs()
         parentId == HOME -> homeChildren()
-        parentId == EXPLORE -> exploreCategories()
-        parentId == LIBRARY -> libraryChildren()
+        parentId == EXPLORE -> exploreChildren()
+        parentId == LIBRARY -> libraryFlatChildren()
         parentId == HISTORY -> recentTracks()
+        // Legacy section ids (pre-flatten) still resolve for any cached MediaIds.
         parentId == LIB_PLAYLISTS -> playlistChildren()
         parentId == LIB_ALBUMS -> albumChildren()
         parentId == LIB_SONGS -> likedTracks()
@@ -182,7 +188,10 @@ class AndroidAutoLibrary(
         parentId == LIB_CLOUD -> cloudTracks()
         parentId == HOME_DAILY -> dailyRecommendTracks()
         parentId.startsWith(EXPLORE_CAT_PREFIX) ->
-            explorePlaylists(Uri.decode(parentId.removePrefix(EXPLORE_CAT_PREFIX)))
+            explorePlaylists(
+                Uri.decode(parentId.removePrefix(EXPLORE_CAT_PREFIX)),
+                groupTitle = Uri.decode(parentId.removePrefix(EXPLORE_CAT_PREFIX)),
+            )
         parentId.startsWith(PLAYLIST_PREFIX) -> playlistTracks(parentId.removePrefix(PLAYLIST_PREFIX))
         parentId.startsWith(ALBUM_PREFIX) -> albumTracks(parentId.removePrefix(ALBUM_PREFIX))
         else -> emptyList()
@@ -398,21 +407,33 @@ class AndroidAutoLibrary(
         }
     }
 
-    private fun exploreCategories(): List<MediaItem> {
-        // Same category list as FindMusicViewModel (phone 发现).
-        return EXPLORE_CATEGORIES.map { category ->
-            browsableItem(
-                mediaId = EXPLORE_CAT_PREFIX + Uri.encode(category),
-                title = category,
-                grid = true,
-            )
+    /**
+     * 发现 flattened to ≤3 levels: Explore → playlists (GRID + category group titles) → tracks.
+     * No intermediate category nodes.
+     */
+    private suspend fun exploreChildren(): List<MediaItem> {
+        if (!isLoggedIn()) return listOf(loginRequiredItem())
+        val items = coroutineScope {
+            EXPLORE_FLAT_GROUPS.map { category ->
+                async {
+                    explorePlaylists(category, groupTitle = category, limit = 12)
+                        .contentOnly()
+                }
+            }.awaitAll().flatten()
+        }
+        return items.ifEmpty {
+            listOf(messageItem(EMPTY_ID, context.getString(R.string.android_auto_empty)))
         }
     }
 
-    private suspend fun explorePlaylists(category: String): List<MediaItem> {
+    private suspend fun explorePlaylists(
+        category: String,
+        groupTitle: String? = null,
+        limit: Int = 30,
+    ): List<MediaItem> {
         if (!isLoggedIn()) return listOf(loginRequiredItem())
         val normalized = if (category == "排行榜") "榜单" else category
-        return when (val result = playlistRepository.getHighQualityPlaylist(normalized, limit = 30)) {
+        return when (val result = playlistRepository.getHighQualityPlaylist(normalized, limit = limit)) {
             is Resource.Success -> result.data.playlists.map { playlist ->
                 browsableItem(
                     mediaId = PLAYLIST_PREFIX + playlist.id,
@@ -420,6 +441,7 @@ class AndroidAutoLibrary(
                     subtitle = playlist.creator.nickname,
                     artworkUri = browseArtwork(playlist.coverImgUrl),
                     grid = true,
+                    groupTitle = groupTitle,
                 )
             }.ifEmpty {
                 listOf(messageItem(EMPTY_ID, context.getString(R.string.android_auto_empty)))
@@ -434,6 +456,43 @@ class AndroidAutoLibrary(
                 messageItem(EMPTY_ID, context.getString(R.string.android_auto_empty)),
             )
         }
+    }
+
+    /**
+     * 媒体库 flattened: Library → playlists/albums/songs (with 歌单/专辑/… group titles) → tracks.
+     * Keeps designer section names as GROUP_TITLE rather than an extra browsable level.
+     */
+    private suspend fun libraryFlatChildren(): List<MediaItem> {
+        val out = ArrayList<MediaItem>()
+        val playlistsTitle = context.getString(LibraryPage.Playlists.titleRes)
+        val albumsTitle = context.getString(LibraryPage.Albums.titleRes)
+        val songsTitle = context.getString(LibraryPage.Songs.titleRes)
+        val downloadsTitle = context.getString(LibraryPage.Downloads.titleRes)
+        val cloudTitle = context.getString(LibraryPage.Cloud.titleRes)
+
+        if (isLoggedIn()) {
+            out += playlistChildren().contentOnly().map { it.withGroupTitle(playlistsTitle) }
+            out += albumChildren().contentOnly().map { it.withGroupTitle(albumsTitle) }
+            out += likedTracks().contentOnly().map { it.withGroupTitle(songsTitle) }
+            out += cloudTracks().contentOnly().map { it.withGroupTitle(cloudTitle) }
+        }
+        out += downloadTracks().contentOnly().map { it.withGroupTitle(downloadsTitle) }
+
+        if (out.isNotEmpty()) return out
+        if (!isLoggedIn()) return listOf(loginRequiredItem())
+        return listOf(messageItem(EMPTY_ID, context.getString(R.string.android_auto_empty)))
+    }
+
+    private fun List<MediaItem>.contentOnly(): List<MediaItem> =
+        filterNot { it.mediaId == LOGIN_ID || it.mediaId == EMPTY_ID || it.mediaId == ERROR_ID }
+
+    private fun MediaItem.withGroupTitle(groupTitle: String): MediaItem {
+        val extras = Bundle(mediaMetadata.extras ?: Bundle()).apply {
+            putString(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE, groupTitle)
+        }
+        return buildUpon()
+            .setMediaMetadata(mediaMetadata.buildUpon().setExtras(extras).build())
+            .build()
     }
 
     private suspend fun recentTracks(): List<MediaItem> {
@@ -831,9 +890,13 @@ class AndroidAutoLibrary(
         private const val EMPTY_ID = "aa_empty"
         private const val ERROR_ID = "aa_error"
 
-        private val EXPLORE_CATEGORIES =
-            "全部,华语,欧美,日语,韩语,粤语,小语种,流行,摇滚,民谣,电子,舞曲,说唱,轻音乐,爵士,乡村,R&B/Soul,古典,民族,英伦,金属,朋克,蓝调,雷鬼,世界音乐,拉丁,另类/独立,New Age,古风,后摇,Bossa Nova,清晨,夜晚,学习,工作,午休,下午茶,地铁,驾车,运动,旅行,散步,酒吧,怀旧,清新,浪漫,性感,伤感,治愈,放松,孤独,感动,兴奋,快乐,安静,思念,影视原声,ACG,儿童,校园,游戏,70后,80后,90后,网络歌曲,KTV,经典,翻唱,吉他,钢琴,器乐,榜单,00后"
-                .split(",")
+        /** Curated 发现 groups shown directly under the Explore tab (GRID + group titles). */
+        private val EXPLORE_FLAT_GROUPS =
+            listOf(
+                "全部", "华语", "欧美", "日语", "韩语",
+                "流行", "摇滚", "电子", "说唱", "轻音乐",
+                "ACG", "古风", "影视原声", "榜单",
+            )
 
         /** Packages allowed to browse/play beyond the app itself and Media3-trusted controllers. */
         val ALLOWED_PACKAGES = setOf(

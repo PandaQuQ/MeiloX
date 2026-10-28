@@ -9,6 +9,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import coil3.SingletonImageLoader
+import com.ljyh.mei.BuildConfig
 import coil3.request.ImageRequest
 import coil3.request.allowHardware
 import coil3.toBitmap
@@ -77,7 +78,7 @@ class ArtworkContentProvider : ContentProvider() {
         private const val PATH_NOW_PLAYING = "nowplaying"
         private val locks = ConcurrentHashMap<String, Any>()
 
-        fun authority(context: Context): String = "${context.packageName}$AUTHORITY_SUFFIX"
+        fun authority(context: Context): String = "${BuildConfig.APPLICATION_ID}$AUTHORITY_SUFFIX"
 
         fun browseUri(context: Context, httpsUrl: String): Uri =
             buildUri(context, PATH_BROWSE, httpsUrl)

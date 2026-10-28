@@ -123,6 +123,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            // Label "MeiloX Dev" via app/src/debug/res/**/strings.xml (app_name).
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
