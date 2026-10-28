@@ -57,10 +57,16 @@ jobs:
           -Pmei.ciRunNumber=${{ github.run_number }}
           -Pmei.ciRunAttempt=${{ github.run_attempt }}
 
+      - name: Artifact name (branch + run number)
+        id: art
+        run: |
+          branch="${{ github.head_ref || github.ref_name }}"
+          echo "name=meilox-debug-${branch//\//-}-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: meilox-debug-${{ github.run_number }}
+          name: ${{ steps.art.outputs.name }}
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
