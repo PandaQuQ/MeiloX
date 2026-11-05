@@ -46,6 +46,7 @@ internal class ColorOsLyricsPublisher(
     private var externalLyric: String? = null
     private var lastExternalMediaId: String? = null
     private var lastExternalTitle: String? = null
+    private var lastArtworkMediaId: String? = null
     private var originalTitle: String? = null
     private var released = false
     private val callback = object : MediaController.Callback() {
@@ -100,11 +101,27 @@ internal class ColorOsLyricsPublisher(
             val lyric = externalLyric.takeIf { currentId != null && currentId == externalMediaId }
             if (lyric != null && !ownsTitle) originalTitle = currentTitle
             val title = lyric ?: if (ownsTitle) originalTitle else currentTitle
-            val artwork = original.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
-                ?: original.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
-            if (artwork != null) externalPlayer?.setArtwork(currentId, artwork)
-            val addArtwork = artwork != null && original.getBitmap(MediaMetadata.METADATA_KEY_ART) == null
             val updateTitle = currentTitle != title
+            // AA lag A/B: text-only lyric/title updates must not decode bitmaps on the main
+            // thread. Only touch getBitmap when ART is missing or ExternalMediaPlayer needs a
+            // fresh cover for a newly seen mediaId.
+            val hasArt = original.containsKey(MediaMetadata.METADATA_KEY_ART)
+            val needsExternalArt = externalPlayer != null &&
+                currentId != null &&
+                currentId != lastArtworkMediaId
+            val needsArtFill = !hasArt
+            if (!updateLyrics && !updateTitle && !needsArtFill && !needsExternalArt) return
+            val artwork = if (needsArtFill || needsExternalArt) {
+                original.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                    ?: original.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+            } else {
+                null
+            }
+            if (artwork != null && needsExternalArt) {
+                externalPlayer?.setArtwork(currentId, artwork)
+                lastArtworkMediaId = currentId
+            }
+            val addArtwork = artwork != null && needsArtFill
             if (!updateLyrics && !updateTitle && !addArtwork) return
             fun buildCandidate(writeLyrics: Boolean) = copyMetadata(original, writeLyrics).apply {
                 if (writeLyrics && desired != null) putString(LYRIC_INFO, desired)
