@@ -19,6 +19,11 @@ internal class SuperLyricPublisher(
     private val player: Player,
     private val scope: CoroutineScope,
 ) {
+    companion object {
+        /** TEMP AA lag A/B: disable the 20ms–1s Main poll. Flip to false to restore. */
+        const val TEMP_DISABLE_SUPER_LYRIC_POLL = true
+    }
+
     private var song: Song? = null
     private var album: String? = null
     private var displayTranslation = true
@@ -37,7 +42,17 @@ internal class SuperLyricPublisher(
 
     fun syncPlayback() {
         updateJob?.cancel()
+        updateJob = null
         lastLineIndex = Int.MIN_VALUE
+        // TEMP AA lag A/B (feature/aa-phone-power-save): the previous loop woke as often as
+        // every 20ms on Dispatchers.Main.immediate via SystemLyricsBridge and competed with
+        // Compose while Android Auto was connected (lists / easter eggs felt ~30Hz). Keep a
+        // one-shot publish so receivers still see the current line, but do not reschedule.
+        // Revert this early-return to restore SuperLyric boundary polling.
+        if (TEMP_DISABLE_SUPER_LYRIC_POLL) {
+            publishCurrentLine()
+            return
+        }
         if (!player.isPlaying || song == null) {
             publishCurrentLine()
             return
